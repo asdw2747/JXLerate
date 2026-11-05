@@ -19,7 +19,7 @@ import struct
 import sys
 import tempfile
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 

@@ -1,6 +1,6 @@
 # strip-images
 
-**Version 1.0.0**
+**Version 1.1.0**
 
 Losslessly strip unnecessary metadata from `.png` and `.jpg`/`.jpeg` files while
 keeping the actual image pixel data bit-for-bit identical.
@@ -56,6 +56,13 @@ strip-images-gui
 
 It lets you pick files/folders, toggle options, and watch a log. No extra
 dependencies beyond Tkinter (bundled with Python).
+
+### Theme
+
+The GUI has a **Theme: Auto / Light / Dark** selector (or press `Ctrl+T` to
+cycle). Auto follows the desktop preference via GNOME `color-scheme`, then GTK
+`~/.config/gtk-3.0/settings.ini`, then the `GTK_THEME` environment variable.
+The choice is saved in `~/.config/strip-images/config.json`.
 
 ## Requirements
 

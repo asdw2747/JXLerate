@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """GUI front-end for strip_images: losslessly strip metadata from PNG/JPEG files."""
+import json
 import os
 import queue
+import subprocess
 import threading
 
 import tkinter as tk
@@ -18,20 +20,148 @@ APP_TITLE = "Strip Image Metadata"
 APP_VERSION = getattr(_si, "__version__", "unknown")
 DONE = "__done__"
 
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "strip-images")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+
+THEMES = {
+    "dark": {
+        "window": "#232629",
+        "base": "#31363b",
+        "alt_base": "#2b2e32",
+        "text": "#eff0f1",
+        "muted": "#a0a4a8",
+        "disabled": "#6d7176",
+        "select_bg": "#2a82da",
+        "select_fg": "#ffffff",
+        "border": "#4f565c",
+        "button": "#3b4045",
+        "button_active": "#4a5056",
+        "trough": "#1b1e20",
+        "accent": "#3daee9",
+        "log_bg": "#1b1e20",
+    },
+    "light": {
+        "window": "#f0f0f0",
+        "base": "#ffffff",
+        "alt_base": "#f7f7f7",
+        "text": "#1a1a1a",
+        "muted": "#555555",
+        "disabled": "#9a9a9a",
+        "select_bg": "#308cc6",
+        "select_fg": "#ffffff",
+        "border": "#c8c8c8",
+        "button": "#e6e6e6",
+        "button_active": "#dcdcdc",
+        "trough": "#d9d9d9",
+        "accent": "#308cc6",
+        "log_bg": "#ffffff",
+    },
+}
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("theme") in ("auto", "light", "dark"):
+            return data
+    except Exception:
+        pass
+    return {"theme": "auto"}
+
+
+def save_config(config):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        tmp = CONFIG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        os.replace(tmp, CONFIG_PATH)
+    except Exception:
+        pass
+
+
+def detect_system_theme() -> str:
+    """Return 'dark' or 'light' based on the desktop's preference."""
+    # 1. GNOME/GTK color-scheme setting.
+    try:
+        result = subprocess.run(
+            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
+            capture_output=True, text=True, timeout=1.5)
+        value = result.stdout.strip().strip("'").lower()
+        if "dark" in value:
+            return "dark"
+        if value in ("default", "prefer-light", "light"):
+            return "light"
+    except Exception:
+        pass
+
+    # 2. GTK 3 settings.ini.
+    try:
+        path = os.path.expanduser("~/.config/gtk-3.0/settings.ini")
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("gtk-application-prefer-dark-theme"):
+                    _, _, value = line.partition("=")
+                    if value.strip().lower() in ("1", "true", "yes"):
+                        return "dark"
+    except Exception:
+        pass
+
+    # 3. GTK_THEME environment variable.
+    try:
+        if "dark" in os.environ.get("GTK_THEME", "").lower():
+            return "dark"
+    except Exception:
+        pass
+
+    return "light"
+
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.config = load_config()
+        self.theme_mode = self.config.get("theme", "auto")
+        self.resolved_theme = (
+            detect_system_theme() if self.theme_mode == "auto" else self.theme_mode)
+        if self.resolved_theme not in THEMES:
+            self.resolved_theme = "light"
+
         self.title(f"{APP_TITLE} v{APP_VERSION}")
-        self.geometry("740x600")
-        self.minsize(620, 500)
+        self.geometry("740x640")
+        self.minsize(620, 540)
+        self.configure(bg=THEMES[self.resolved_theme]["window"])
 
         self.files = []
         self.worker = None
         self.log_queue = queue.Queue()
+        self.style = ttk.Style(self)
+        self.theme_var = tk.StringVar(value=self.theme_mode)
+        self._poll_id = None
 
         self._build_ui()
+        self.apply_theme(self.theme_mode)
         self._poll_queue()
+        self.bind("<Destroy>", self._on_destroy)
+        self.bind_all("<Control-t>", lambda _e: self._cycle_theme())
+
+    def _on_destroy(self, event):
+        if event.widget is self and self._poll_id:
+            try:
+                self.after_cancel(self._poll_id)
+            except Exception:
+                pass
+            self._poll_id = None
+
+    def _add_check(self, parent, text, variable, row, column):
+        widget = tk.Checkbutton(
+            parent, text=text, variable=variable, anchor="w",
+            highlightthickness=0, borderwidth=0, takefocus=True)
+        widget.grid(row=row, column=column, sticky="w", padx=4, pady=2)
+        self._check_widgets.append(widget)
+        return widget
 
     def _build_ui(self):
         pad = {"padx": 6, "pady": 4}
@@ -43,7 +173,7 @@ class App(tk.Tk):
         ttk.Label(top, text="Files to process:").pack(anchor="w")
         list_frame = ttk.Frame(top)
         list_frame.pack(fill="both", expand=True)
-        self.listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED)
+        self.listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, activestyle="none")
         sb = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
         self.listbox.config(yscrollcommand=sb.set)
         self.listbox.pack(side="left", fill="both", expand=True)
@@ -60,42 +190,51 @@ class App(tk.Tk):
         opts = ttk.LabelFrame(self, text="Options")
         opts.pack(fill="x", **pad)
 
+        self._check_widgets = []
+        self._radio_widgets = []
+
         self.recursive_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Recurse into folders", variable=self.recursive_var).grid(
-            row=0, column=0, sticky="w", padx=4, pady=2)
+        self._add_check(opts, "Recurse into folders", self.recursive_var, 0, 0)
 
         self.backup_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Keep .bak of originals", variable=self.backup_var).grid(
-            row=0, column=1, sticky="w", padx=4, pady=2)
+        self._add_check(opts, "Keep .bak of originals", self.backup_var, 0, 1)
 
         self.verify_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Verify pixels unchanged", variable=self.verify_var).grid(
-            row=1, column=0, sticky="w", padx=4, pady=2)
+        self._add_check(opts, "Verify pixels unchanged", self.verify_var, 1, 0)
 
         self.keep_color_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Keep color info", variable=self.keep_color_var).grid(
-            row=1, column=1, sticky="w", padx=4, pady=2)
+        self._add_check(opts, "Keep color info", self.keep_color_var, 1, 1)
 
         self.dryrun_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Dry run (report only)", variable=self.dryrun_var).grid(
-            row=2, column=0, sticky="w", padx=4, pady=2)
+        self._add_check(opts, "Dry run (report only)", self.dryrun_var, 2, 0)
 
         self.passthrough_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Passthrough other files", variable=self.passthrough_var).grid(
-            row=2, column=1, sticky="w", padx=4, pady=2)
+        self._add_check(opts, "Passthrough other files", self.passthrough_var, 2, 1)
 
-        ttk.Label(opts, text="Suffix:").grid(row=3, column=0, sticky="w", padx=4, pady=2)
+        # --- theme selector ---
+        theme_row = ttk.Frame(opts)
+        theme_row.grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+        ttk.Label(theme_row, text="Theme:").pack(side="left", padx=(0, 6))
+        for value, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
+            radio = tk.Radiobutton(
+                theme_row, text=label, value=value, variable=self.theme_var,
+                command=self._on_theme_change, anchor="w",
+                highlightthickness=0, borderwidth=0, takefocus=True)
+            radio.pack(side="left", padx=4)
+            self._radio_widgets.append(radio)
+
+        ttk.Label(opts, text="Suffix:").grid(row=4, column=0, sticky="w", padx=4, pady=2)
         self.suffix_var = tk.StringVar(value="")
         ttk.Entry(opts, textvariable=self.suffix_var, width=16).grid(
-            row=3, column=1, sticky="w", padx=4, pady=2)
+            row=4, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Label(opts, text="Output folder (blank = in place):").grid(
-            row=4, column=0, sticky="w", padx=4, pady=2)
+            row=5, column=0, sticky="w", padx=4, pady=2)
         self.outdir_var = tk.StringVar(value="")
         ttk.Entry(opts, textvariable=self.outdir_var, width=40).grid(
-            row=4, column=1, sticky="we", padx=4, pady=2)
+            row=5, column=1, sticky="we", padx=4, pady=2)
         ttk.Button(opts, text="Browse", command=self.browse_outdir).grid(
-            row=4, column=2, padx=4, pady=2)
+            row=5, column=2, padx=4, pady=2)
         opts.columnconfigure(1, weight=1)
 
         # --- run ---
@@ -106,10 +245,7 @@ class App(tk.Tk):
         self.progress = ttk.Progressbar(run_row, mode="indeterminate")
         self.progress.pack(side="left", fill="x", expand=True, padx=8)
 
-        self.hint = ttk.Label(
-            self,
-            text="Tip: leave Output folder blank to overwrite in place; set it to keep copies.",
-            foreground="#555")
+        self.hint = ttk.Label(self, text="")
         self.hint.pack(anchor="w", padx=6)
 
         # --- log ---
@@ -121,6 +257,94 @@ class App(tk.Tk):
         self.log.config(yscrollcommand=lsb.set)
         self.log.pack(side="left", fill="both", expand=True)
         lsb.pack(side="right", fill="y")
+
+    # -- theming ------------------------------------------------------------
+    def apply_theme(self, mode):
+        self.theme_mode = mode
+        resolved = detect_system_theme() if mode == "auto" else mode
+        if resolved not in THEMES:
+            resolved = "light"
+        self.resolved_theme = resolved
+        p = THEMES[resolved]
+
+        self.configure(bg=p["window"])
+        s = self.style
+        s.theme_use("clam")
+
+        s.configure(
+            ".", background=p["window"], foreground=p["text"],
+            fieldbackground=p["base"], bordercolor=p["border"],
+            lightcolor=p["window"], darkcolor=p["window"],
+            troughcolor=p["trough"], focuscolor=p["accent"],
+            selectbackground=p["select_bg"], selectforeground=p["select_fg"])
+        s.configure("TFrame", background=p["window"])
+        s.configure("TLabel", background=p["window"], foreground=p["text"])
+        s.configure("TLabelframe", background=p["window"], foreground=p["text"],
+                    bordercolor=p["border"], lightcolor=p["border"],
+                    darkcolor=p["border"])
+        s.configure("TLabelframe.Label", background=p["window"], foreground=p["text"])
+        s.configure("TButton", background=p["button"], foreground=p["text"],
+                    bordercolor=p["border"], lightcolor=p["window"],
+                    darkcolor=p["window"], focusthickness=1)
+        s.map("TButton",
+              background=[("pressed", p["button_active"]), ("active", p["button_active"])],
+              foreground=[("disabled", p["disabled"])])
+        s.configure("TEntry", fieldbackground=p["base"], foreground=p["text"],
+                    insertcolor=p["text"], bordercolor=p["border"],
+                    lightcolor=p["border"], darkcolor=p["border"])
+        s.map("TEntry",
+              fieldbackground=[("disabled", p["alt_base"])],
+              foreground=[("disabled", p["disabled"])])
+        s.configure("TProgressbar", background=p["accent"], troughcolor=p["trough"],
+                    bordercolor=p["border"], lightcolor=p["accent"],
+                    darkcolor=p["accent"])
+        s.configure("TScrollbar", background=p["button"], troughcolor=p["trough"],
+                    bordercolor=p["border"], arrowcolor=p["text"],
+                    lightcolor=p["window"], darkcolor=p["window"], relief="flat")
+        s.map("TScrollbar", background=[("active", p["button_active"])])
+
+        # Classic tk widgets must be recolored explicitly.
+        self.listbox.configure(
+            background=p["base"], foreground=p["text"],
+            selectbackground=p["select_bg"], selectforeground=p["select_fg"],
+            highlightbackground=p["border"], highlightcolor=p["accent"],
+            highlightthickness=1, borderwidth=0, relief="flat",
+            disabledforeground=p["disabled"])
+        self.log.configure(
+            background=p["log_bg"], foreground=p["text"],
+            insertbackground=p["text"],
+            selectbackground=p["select_bg"], selectforeground=p["select_fg"],
+            highlightbackground=p["border"], highlightcolor=p["accent"],
+            highlightthickness=1, borderwidth=0, relief="flat")
+
+        # Classic tk check/radio buttons give a clear checkmark/dot.
+        for widget in self._check_widgets + self._radio_widgets:
+            widget.configure(
+                background=p["window"], foreground=p["text"],
+                activebackground=p["window"], activeforeground=p["text"],
+                selectcolor=p["base"], disabledforeground=p["disabled"],
+                highlightbackground=p["window"], highlightcolor=p["accent"])
+
+        label = mode if mode != "auto" else f"auto ({resolved})"
+        self.hint.configure(
+            text=(f"Theme: {label}.  Tip: leave Output folder blank to overwrite "
+                  "in place; set it to keep copies."),
+            foreground=p["muted"])
+
+    def _on_theme_change(self):
+        mode = self.theme_var.get()
+        self.apply_theme(mode)
+        self.config["theme"] = mode
+        save_config(self.config)
+
+    def _cycle_theme(self):
+        order = ["auto", "dark", "light"]
+        try:
+            index = order.index(self.theme_var.get())
+        except ValueError:
+            index = 0
+        self.theme_var.set(order[(index + 1) % len(order)])
+        self._on_theme_change()
 
     # -- logging / queue ----------------------------------------------------
     def log_msg(self, msg):
@@ -139,7 +363,7 @@ class App(tk.Tk):
                     self.log_msg(msg)
         except queue.Empty:
             pass
-        self.after(100, self._poll_queue)
+        self._poll_id = self.after(100, self._poll_queue)
 
     # -- file selection -----------------------------------------------------
     def add_files(self):

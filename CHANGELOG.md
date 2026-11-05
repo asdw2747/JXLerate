@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-05
+
+### Added
+- Dark mode for the GUI, using a Breeze-inspired palette.
+- Automatic theme detection (GNOME `color-scheme`, GTK `settings.ini`,
+  or `GTK_THEME`), with an Auto/Light/Dark selector to override it.
+- Live theme switching via the selector or `Ctrl+T`.
+- The chosen theme is persisted in `~/.config/strip-images/config.json`.
+- Clear checkmark/radio indicators by using themed classic Tk controls.
+
 ## [1.0.0] - 2026-11-05
 
 First stable release. Losslessly strips metadata from PNG and JPEG files
