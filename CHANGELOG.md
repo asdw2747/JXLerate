@@ -3,6 +3,12 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-11-05
+
+### Changed
+- Relicensed the project under the MIT License.
+- Added SPDX license headers to both source files.
+
 ## [1.3.0] - 2026-11-05
 
 ### Added

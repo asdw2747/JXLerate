@@ -1,6 +1,6 @@
 # strip-images
 
-**Version 1.3.0**
+**Version 1.3.1**
 
 Losslessly strip unnecessary metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and
 `.gif` files while keeping the actual image pixel data bit-for-bit identical.
@@ -103,3 +103,9 @@ GNOME `color-scheme`, then GTK `~/.config/gtk-3.0/settings.ini`, then the
 ## Requirements
 
 Python 3.8+. Pillow optional (only for `--verify`). No other dependencies.
+
+## License
+
+MIT License — see [LICENSE](LICENSE).
+
+Copyright (c) 2026 Prisma Chill.

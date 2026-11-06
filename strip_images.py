@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Prisma Chill
 """strip_images - losslessly strip metadata from PNG, JPEG, WebP and GIF files.
 
 Removes all non-essential chunks/markers (EXIF, text, gamma, color profiles,
@@ -24,7 +26,7 @@ import sys
 import tempfile
 import zlib
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
