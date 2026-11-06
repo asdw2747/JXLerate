@@ -22,8 +22,9 @@ import stat
 import struct
 import sys
 import tempfile
+import zlib
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
@@ -58,12 +59,81 @@ GIF_APP_ICC = b"ICCRGBG1012"
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
+ORIENTATION_TAG = 0x0112
+
+
+# ---------------------------------------------------------------------------
+# Orientation helpers
+# ---------------------------------------------------------------------------
+
+def tiff_orientation(tiff: bytes):
+    """Return the EXIF Orientation value (1-8) from a TIFF payload, or None."""
+    if len(tiff) < 8:
+        return None
+    order = tiff[:2]
+    if order == b"II":
+        endian = "<"
+    elif order == b"MM":
+        endian = ">"
+    else:
+        return None
+    if struct.unpack(endian + "H", tiff[2:4])[0] != 42:
+        return None
+
+    ifd = struct.unpack(endian + "I", tiff[4:8])[0]
+    if ifd + 2 > len(tiff):
+        return None
+    count = struct.unpack(endian + "H", tiff[ifd:ifd + 2])[0]
+    pos = ifd + 2
+    for _ in range(count):
+        if pos + 12 > len(tiff):
+            return None
+        tag, typ, n = struct.unpack(endian + "HHI", tiff[pos:pos + 8])
+        if tag == ORIENTATION_TAG and typ == 3 and n >= 1:
+            if n == 1:
+                value = struct.unpack(endian + "H", tiff[pos + 8:pos + 10])[0]
+            else:
+                offset = struct.unpack(endian + "I", tiff[pos + 8:pos + 12])[0]
+                if offset + 2 > len(tiff):
+                    return None
+                value = struct.unpack(endian + "H", tiff[offset:offset + 2])[0]
+            return value if 1 <= value <= 8 else None
+        pos += 12
+    return None
+
+
+def build_minimal_tiff(value: int) -> bytes:
+    """Build a tiny little-endian TIFF block containing only Orientation."""
+    out = bytearray(b"II")
+    out += struct.pack("<H", 42)          # TIFF magic
+    out += struct.pack("<I", 8)           # IFD0 offset
+    out += struct.pack("<H", 1)           # one entry
+    out += struct.pack("<HHI", ORIENTATION_TAG, 3, 1)
+    out += struct.pack("<H", value) + b"\x00\x00"  # inline SHORT
+    out += struct.pack("<I", 0)           # no next IFD
+    return bytes(out)
+
+
+def jpeg_orientation_segment(value: int) -> bytes:
+    """Build a minimal EXIF APP1 segment carrying only Orientation."""
+    payload = b"Exif\x00\x00" + build_minimal_tiff(value)
+    return b"\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload
+
+
+def png_orientation_chunk(value: int) -> bytes:
+    """Build a minimal PNG eXIf chunk carrying only Orientation."""
+    data = build_minimal_tiff(value)
+    body = b"eXIf" + data
+    return (struct.pack(">I", len(data)) + body +
+            struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
 
 # ---------------------------------------------------------------------------
 # Core stripping
 # ---------------------------------------------------------------------------
 
-def strip_png(data: bytes, keep_color: bool = False) -> bytes:
+def strip_png(data: bytes, keep_color: bool = False,
+              keep_orientation: bool = True) -> bytes:
     if data[:8] != PNG_SIG:
         raise ValueError("not a PNG file")
 
@@ -76,6 +146,7 @@ def strip_png(data: bytes, keep_color: bool = False) -> bytes:
     n = len(data)
     first_type = None
     last_type = None
+    orientation = None
 
     while pos < n:
         if pos + 12 > n:
@@ -88,6 +159,8 @@ def strip_png(data: bytes, keep_color: bool = False) -> bytes:
         if first_type is None:
             first_type = ctype
         last_type = ctype
+        if ctype == b"eXIf" and orientation is None:
+            orientation = tiff_orientation(data[pos + 8:pos + 8 + length])
         if ctype in keep:
             out.extend(data[pos:pos + total])
         pos += total
@@ -96,10 +169,18 @@ def strip_png(data: bytes, keep_color: bool = False) -> bytes:
         raise ValueError("invalid PNG (missing IHDR)")
     if last_type != b"IEND":
         raise ValueError("invalid/truncated PNG (missing IEND)")
+
+    if keep_orientation and orientation in range(2, 9):
+        # Insert a minimal eXIf chunk immediately after IHDR.
+        ihdr_len = struct.unpack(">I", out[8:12])[0]
+        insert_at = 8 + 12 + ihdr_len
+        out[insert_at:insert_at] = png_orientation_chunk(orientation)
+
     return bytes(out)
 
 
-def strip_jpeg(data: bytes, keep_color: bool = False) -> bytes:
+def strip_jpeg(data: bytes, keep_color: bool = False,
+               keep_orientation: bool = True) -> bytes:
     if data[:2] != b"\xff\xd8":
         raise ValueError("not a JPEG file")
 
@@ -107,6 +188,7 @@ def strip_jpeg(data: bytes, keep_color: bool = False) -> bytes:
     i = 2
     n = len(data)
     found_eoi = False
+    orientation = None
 
     while i < n:
         # Find the next marker (skip stray bytes).
@@ -181,6 +263,11 @@ def strip_jpeg(data: bytes, keep_color: bool = False) -> bytes:
                 break
             continue
 
+        if marker == 0xE1 and orientation is None:
+            payload = data[i + 2:i + length]
+            if payload[:6] == b"Exif\x00\x00":
+                orientation = tiff_orientation(payload[6:])
+
         keep = marker in JPEG_KEEP_MARKERS or marker in JPEG_KEEP_APP
         if keep_color and marker in JPEG_KEEP_APP_COLOR:
             keep = True
@@ -191,17 +278,26 @@ def strip_jpeg(data: bytes, keep_color: bool = False) -> bytes:
 
     if not found_eoi:
         raise ValueError("invalid/truncated JPEG (missing EOI marker)")
+
+    if keep_orientation and orientation in range(2, 9):
+        out[2:2] = jpeg_orientation_segment(orientation)
+
     return bytes(out)
 
 
-def strip_webp(data: bytes, keep_color: bool = False) -> bytes:
+def strip_webp(data: bytes, keep_color: bool = False,
+               keep_orientation: bool = True) -> bytes:
     if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
         raise ValueError("not a WebP file")
 
+    # First pass: parse chunks and look for an EXIF orientation.
+    parsed = []
     pos = 12
     n = len(data)
-    chunks = []
     has_image = False
+    has_vp8x = False
+    orientation = None
+    exif_prefix = b""
 
     while pos < n:
         if pos + 8 > n:
@@ -219,29 +315,51 @@ def strip_webp(data: bytes, keep_color: bool = False) -> bytes:
         payload = data[payload_start:payload_end]
         pad = data[payload_end:padded_end]
         pos = padded_end
+        parsed.append((fourcc, payload, pad))
 
         if fourcc in (b"VP8 ", b"VP8L", b"ANMF"):
             has_image = True
-
-        keep = fourcc in WEBP_KEEP_CHUNKS
-        if keep_color and fourcc == b"ICCP":
-            keep = True
-
-        if keep:
-            if fourcc == b"VP8X":
-                if not payload:
-                    raise ValueError("invalid WebP (empty VP8X chunk)")
-                # Clear ICC/EXIF/XMP presence flags for chunks we remove.
-                flags = payload[0]
-                if not keep_color:
-                    flags &= ~0x20  # ICC profile
-                flags &= ~0x08  # EXIF
-                flags &= ~0x04  # XMP
-                payload = bytes([flags]) + payload[1:]
-            chunks.append(fourcc + struct.pack("<I", len(payload)) + payload + pad)
+        elif fourcc == b"VP8X":
+            has_vp8x = True
+        elif fourcc == b"EXIF" and orientation is None:
+            if payload[:6] == b"Exif\x00\x00":
+                exif_prefix = b"Exif\x00\x00"
+                orientation = tiff_orientation(payload[6:])
+            else:
+                orientation = tiff_orientation(payload)
 
     if not has_image:
         raise ValueError("invalid WebP (no image data)")
+
+    inject = keep_orientation and orientation in range(2, 9) and has_vp8x
+    chunks = []
+
+    for fourcc, payload, pad in parsed:
+        keep = fourcc in WEBP_KEEP_CHUNKS
+        if keep_color and fourcc == b"ICCP":
+            keep = True
+        if not keep:
+            continue
+
+        if fourcc == b"VP8X":
+            if not payload:
+                raise ValueError("invalid WebP (empty VP8X chunk)")
+            flags = payload[0]
+            if not keep_color:
+                flags &= ~0x20  # ICC profile
+            if inject:
+                flags |= 0x08   # EXIF present
+            else:
+                flags &= ~0x08
+            flags &= ~0x04      # XMP
+            payload = bytes([flags]) + payload[1:]
+
+        chunks.append(fourcc + struct.pack("<I", len(payload)) + payload + pad)
+
+    if inject:
+        payload = exif_prefix + build_minimal_tiff(orientation)
+        pad = b"\x00" if len(payload) & 1 else b""
+        chunks.append(b"EXIF" + struct.pack("<I", len(payload)) + payload + pad)
 
     body = b"WEBP" + b"".join(chunks)
     return b"RIFF" + struct.pack("<I", len(body)) + body
@@ -261,7 +379,8 @@ def _gif_subblocks_end(data: bytes, pos: int) -> int:
         pos += size
 
 
-def strip_gif(data: bytes, keep_color: bool = False) -> bytes:
+def strip_gif(data: bytes, keep_color: bool = False,
+              keep_orientation: bool = True) -> bytes:
     if data[:6] not in (b"GIF87a", b"GIF89a"):
         raise ValueError("not a GIF file")
     if len(data) < 13:
@@ -343,19 +462,20 @@ def strip_gif(data: bytes, keep_color: bool = False) -> bytes:
     return bytes(out)
 
 
-def strip_file(path: str, keep_color: bool = False) -> tuple[bytes, int, bool]:
+def strip_file(path: str, keep_color: bool = False,
+               keep_orientation: bool = True) -> tuple[bytes, int, bool]:
     """Return (stripped_bytes, original_size, changed)."""
     with open(path, "rb") as f:
         data = f.read()
     low = path.lower()
     if low.endswith(".png"):
-        new = strip_png(data, keep_color)
+        new = strip_png(data, keep_color, keep_orientation)
     elif low.endswith(".jpg") or low.endswith(".jpeg"):
-        new = strip_jpeg(data, keep_color)
+        new = strip_jpeg(data, keep_color, keep_orientation)
     elif low.endswith(".webp"):
-        new = strip_webp(data, keep_color)
+        new = strip_webp(data, keep_color, keep_orientation)
     elif low.endswith(".gif"):
-        new = strip_gif(data, keep_color)
+        new = strip_gif(data, keep_color, keep_orientation)
     else:
         raise ValueError(f"unsupported file type: {path}")
     return new, len(data), (new != data)
@@ -562,6 +682,8 @@ def main():
     ap.add_argument("--verify", action="store_true", help="verify pixel data is unchanged (requires Pillow)")
     ap.add_argument("--keep-color", action="store_true",
                     help="keep color metadata (PNG color chunks, JPEG/WebP/GIF ICC)")
+    ap.add_argument("--strip-orientation", action="store_true",
+                    help="also remove the EXIF Orientation tag (photos may display rotated)")
     ap.add_argument("--passthrough", action="store_true",
                     help="copy non-image files into the output folder too (requires -o)")
     ap.add_argument("--skip-clean", action="store_true",
@@ -598,7 +720,8 @@ def main():
 
     for fp, base_dir in entries:
         try:
-            new_data, orig_size, changed = strip_file(fp, args.keep_color)
+            new_data, orig_size, changed = strip_file(
+                fp, args.keep_color, not args.strip_orientation)
         except Exception as e:
             print(f"FAIL {fp}: {e}", file=sys.stderr)
             fail += 1

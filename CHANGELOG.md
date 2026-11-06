@@ -3,6 +3,23 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-11-05
+
+### Added
+- EXIF **Orientation is preserved by default** so portrait photos keep
+  displaying correctly. Only a minimal ~26-byte TIFF block is written, and only
+  when the orientation is 2–8; all other EXIF fields are still removed.
+- Orientation preservation for JPEG (`APP1`), PNG/APNG (`eXIf`), and WebP
+  (`EXIF`, with the VP8X flag updated).
+- `--strip-orientation` to opt out, plus a **Preserve orientation** GUI
+  checkbox (checked by default).
+- GUI: determinate progress with the current filename, **Cancel** button, and
+  **Open output folder** button.
+- GUI: confirmation prompt before modifying originals in place.
+- GUI: remembers all options, theme, and window size/position.
+- GUI: file count label and status bar.
+- GUI shortcuts: `Ctrl+O`, `Ctrl+Shift+O`, `Ctrl+Enter`, `Esc`.
+
 ## [1.2.0] - 2026-11-05
 
 ### Added

@@ -1,6 +1,6 @@
 # strip-images
 
-**Version 1.2.0**
+**Version 1.3.0**
 
 Losslessly strip unnecessary metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and
 `.gif` files while keeping the actual image pixel data bit-for-bit identical.
@@ -23,6 +23,19 @@ Losslessly strip unnecessary metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and
 With `--keep-color`, color/rendering metadata is preserved too (PNG
 `cHRM`/`gAMA`/`iCCP`/`sRGB`/`cICP`, JPEG APP2 ICC profiles, WebP/GIF ICC).
 
+## Orientation is preserved by default
+
+Stripping EXIF normally removes the `Orientation` tag, which makes portrait
+camera photos display rotated. This tool instead keeps a **minimal** orientation
+block:
+
+- Only written when the value is 2–8; orientation 1/absent adds nothing.
+- ~26-byte TIFF block (~36 bytes in a JPEG APP1, including segment header).
+- GPS, dates, camera info, comments, and all other EXIF fields are still removed.
+- Applies to JPEG (`APP1`), PNG/APNG (`eXIf`), and WebP (`EXIF`).
+- Disable with `--strip-orientation` (CLI) or the GUI's **Preserve orientation**
+  checkbox.
+
 The image is never re-encoded, so there is no quality loss. Outputs are
 validated (PNG `IEND`, JPEG `EOI`, GIF trailer, WebP image data) and written
 atomically so an interrupted run cannot corrupt the original. File permissions
@@ -44,11 +57,9 @@ Options:
 - `-o, --output-dir DIR` write stripped copies instead of overwriting
 - `--passthrough` copy non-image files into the output folder too (requires -o)
 - `--keep-color` keep color/rendering metadata (see above)
+- `--strip-orientation` remove the Orientation tag too (not recommended)
 - `--skip-clean` do not write files that already have no metadata to strip
 - `--only-if-smaller` only write when the result is smaller (implies skip-clean)
-
-Skipped files are not written to the output folder either, so with `-o` you
-get only the files that actually changed.
 - `--suffix S` append suffix to filenames
 - `--backup` keep a `.bak` of the original (in-place mode)
 - `--dry-run` report savings without writing
@@ -57,26 +68,37 @@ get only the files that actually changed.
 - `-q, --quiet` suppress per-file output
 - `--version` print the version number and exit
 
-When several input folders are given, each folder keeps its own name in the
-output tree so same-named files cannot overwrite each other.
+Skipped files are not written to the output folder either, so with `-o` you
+get only the files that actually changed. When several input folders are given,
+each folder keeps its own name in the output tree so same-named files cannot
+overwrite each other.
 
 ## GUI
 
-A simple Tkinter GUI is included:
+A Tkinter GUI is included:
 
 ```sh
 strip-images-gui
 ```
 
-It lets you pick files/folders, toggle options, and watch a log. No extra
-dependencies beyond Tkinter (bundled with Python).
+Features:
+
+- Add files/folders, recursion, output folder, suffix, backups, dry-run,
+  verification, color preservation, orientation preservation, passthrough,
+  skip-clean, and only-if-smaller.
+- Determinate progress with the current filename and a **Cancel** button.
+- **Open** button to launch the output folder.
+- Confirmation before overwriting originals in place.
+- Remembers all options, the theme, and the window position/size.
+- Shortcuts: `Ctrl+O` add files, `Ctrl+Shift+O` add folder, `Ctrl+Enter` run,
+  `Esc` cancel, `Ctrl+T` cycle theme.
 
 ### Theme
 
-The GUI has a **Theme: Auto / Light / Dark** selector (or press `Ctrl+T` to
-cycle). Auto follows the desktop preference via GNOME `color-scheme`, then GTK
-`~/.config/gtk-3.0/settings.ini`, then the `GTK_THEME` environment variable.
-The choice is saved in `~/.config/strip-images/config.json`.
+The **Theme: Auto / Light / Dark** selector follows the desktop preference via
+GNOME `color-scheme`, then GTK `~/.config/gtk-3.0/settings.ini`, then the
+`GTK_THEME` environment variable. Settings are saved in
+`~/.config/strip-images/config.json`.
 
 ## Requirements
 

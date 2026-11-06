@@ -3,7 +3,10 @@
 import json
 import os
 import queue
+import re
+import shutil
 import subprocess
+import sys
 import threading
 
 import tkinter as tk
@@ -22,6 +25,8 @@ DONE = "__done__"
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "strip-images")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+
+_GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
 THEMES = {
     "dark": {
@@ -63,11 +68,15 @@ def load_config():
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict) and data.get("theme") in ("auto", "light", "dark"):
+        if isinstance(data, dict):
+            if data.get("theme") not in ("auto", "light", "dark"):
+                data["theme"] = "auto"
+            if not isinstance(data.get("options"), dict):
+                data["options"] = {}
             return data
     except Exception:
         pass
-    return {"theme": "auto"}
+    return {"theme": "auto", "options": {}}
 
 
 def save_config(config):
@@ -83,7 +92,6 @@ def save_config(config):
 
 def detect_system_theme() -> str:
     """Return 'dark' or 'light' based on the desktop's preference."""
-    # 1. GNOME/GTK color-scheme setting.
     try:
         result = subprocess.run(
             ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
@@ -96,7 +104,6 @@ def detect_system_theme() -> str:
     except Exception:
         pass
 
-    # 2. GTK 3 settings.ini.
     try:
         path = os.path.expanduser("~/.config/gtk-3.0/settings.ini")
         with open(path, encoding="utf-8") as f:
@@ -109,7 +116,6 @@ def detect_system_theme() -> str:
     except Exception:
         pass
 
-    # 3. GTK_THEME environment variable.
     try:
         if "dark" in os.environ.get("GTK_THEME", "").lower():
             return "dark"
@@ -122,30 +128,82 @@ def detect_system_theme() -> str:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.config = load_config()
-        self.theme_mode = self.config.get("theme", "auto")
+        self.config_data = load_config()
+        self.saved_options = self.config_data.get("options", {})
+        self.theme_mode = self.config_data.get("theme", "auto")
         self.resolved_theme = (
             detect_system_theme() if self.theme_mode == "auto" else self.theme_mode)
         if self.resolved_theme not in THEMES:
             self.resolved_theme = "light"
 
         self.title(f"{APP_TITLE} v{APP_VERSION}")
-        self.geometry("740x640")
-        self.minsize(620, 540)
+        geometry = self.config_data.get("geometry")
+        self.geometry(geometry if isinstance(geometry, str) and _GEOMETRY_RE.match(geometry)
+                      else "780x780")
+        self.minsize(660, 640)
         self.configure(bg=THEMES[self.resolved_theme]["window"])
 
         self.files = []
         self.worker = None
+        self.cancel_event = threading.Event()
         self.log_queue = queue.Queue()
         self.style = ttk.Style(self)
         self.theme_var = tk.StringVar(value=self.theme_mode)
+        self.status_var = tk.StringVar(value="Ready")
+        self.last_output_dir = None
         self._poll_id = None
 
         self._build_ui()
         self.apply_theme(self.theme_mode)
         self._poll_queue()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.bind("<Destroy>", self._on_destroy)
+
+        self.bind_all("<Control-o>", lambda _e: self.add_files())
+        self.bind_all("<Control-O>", lambda _e: self.add_folder())
+        self.bind_all("<Control-Return>", lambda _e: self.run())
+        self.bind_all("<Control-KP_Enter>", lambda _e: self.run())
         self.bind_all("<Control-t>", lambda _e: self._cycle_theme())
+        self.bind_all("<Escape>", lambda _e: self.cancel_run())
+
+    # -- config -------------------------------------------------------------
+    def _opt(self, key, default):
+        return self.saved_options.get(key, default)
+
+    def _current_geometry(self):
+        """Return the current geometry, ignoring the pre-map 1x1 value."""
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+        geom = self.geometry()
+        match = re.match(r"^(\d+)x(\d+)", geom)
+        if match and int(match.group(1)) >= 300 and int(match.group(2)) >= 300:
+            return geom
+        saved = self.config_data.get("geometry")
+        return saved if isinstance(saved, str) and _GEOMETRY_RE.match(saved) else "780x780"
+
+    def _save_settings(self):
+        self.config_data["theme"] = self.theme_mode
+        self.config_data["geometry"] = self._current_geometry()
+        self.config_data["options"] = {
+            "recursive": self.recursive_var.get(),
+            "backup": self.backup_var.get(),
+            "verify": self.verify_var.get(),
+            "keep_color": self.keep_color_var.get(),
+            "keep_orientation": self.keep_orientation_var.get(),
+            "dryrun": self.dryrun_var.get(),
+            "passthrough": self.passthrough_var.get(),
+            "skip_clean": self.skip_clean_var.get(),
+            "only_smaller": self.only_smaller_var.get(),
+            "suffix": self.suffix_var.get(),
+            "outdir": self.outdir_var.get(),
+        }
+        save_config(self.config_data)
+
+    def _on_close(self):
+        self._save_settings()
+        self.destroy()
 
     def _on_destroy(self, event):
         if event.widget is self and self._poll_id:
@@ -155,6 +213,7 @@ class App(tk.Tk):
                 pass
             self._poll_id = None
 
+    # -- UI construction ----------------------------------------------------
     def _add_check(self, parent, text, variable, row, column):
         widget = tk.Checkbutton(
             parent, text=text, variable=variable, anchor="w",
@@ -166,11 +225,11 @@ class App(tk.Tk):
     def _build_ui(self):
         pad = {"padx": 6, "pady": 4}
 
-        # --- file list ---
         top = ttk.Frame(self)
         top.pack(fill="both", expand=True, **pad)
 
-        ttk.Label(top, text="Files to process:").pack(anchor="w")
+        self.files_label = ttk.Label(top, text="Files to process: 0")
+        self.files_label.pack(anchor="w")
         list_frame = ttk.Frame(top)
         list_frame.pack(fill="both", expand=True)
         self.listbox = tk.Listbox(list_frame, selectmode=tk.EXTENDED, activestyle="none")
@@ -186,40 +245,42 @@ class App(tk.Tk):
         ttk.Button(btn_row, text="Remove Selected", command=self.remove_selected).pack(side="left", padx=2)
         ttk.Button(btn_row, text="Clear", command=self.clear_files).pack(side="left", padx=2)
 
-        # --- options ---
         opts = ttk.LabelFrame(self, text="Options")
         opts.pack(fill="x", **pad)
 
         self._check_widgets = []
         self._radio_widgets = []
 
-        self.recursive_var = tk.BooleanVar(value=True)
+        self.recursive_var = tk.BooleanVar(value=bool(self._opt("recursive", True)))
         self._add_check(opts, "Recurse into folders", self.recursive_var, 0, 0)
 
-        self.backup_var = tk.BooleanVar(value=False)
+        self.backup_var = tk.BooleanVar(value=bool(self._opt("backup", False)))
         self._add_check(opts, "Keep .bak of originals", self.backup_var, 0, 1)
 
-        self.verify_var = tk.BooleanVar(value=True)
+        self.verify_var = tk.BooleanVar(value=bool(self._opt("verify", True)))
         self._add_check(opts, "Verify pixels unchanged", self.verify_var, 1, 0)
 
-        self.keep_color_var = tk.BooleanVar(value=False)
+        self.keep_color_var = tk.BooleanVar(value=bool(self._opt("keep_color", False)))
         self._add_check(opts, "Keep color info", self.keep_color_var, 1, 1)
 
-        self.dryrun_var = tk.BooleanVar(value=False)
+        self.dryrun_var = tk.BooleanVar(value=bool(self._opt("dryrun", False)))
         self._add_check(opts, "Dry run (report only)", self.dryrun_var, 2, 0)
 
-        self.passthrough_var = tk.BooleanVar(value=False)
+        self.passthrough_var = tk.BooleanVar(value=bool(self._opt("passthrough", False)))
         self._add_check(opts, "Passthrough other files", self.passthrough_var, 2, 1)
 
-        self.skip_clean_var = tk.BooleanVar(value=False)
+        self.skip_clean_var = tk.BooleanVar(value=bool(self._opt("skip_clean", False)))
         self._add_check(opts, "Skip unchanged files", self.skip_clean_var, 3, 0)
 
-        self.only_smaller_var = tk.BooleanVar(value=False)
+        self.only_smaller_var = tk.BooleanVar(value=bool(self._opt("only_smaller", False)))
         self._add_check(opts, "Only write if smaller", self.only_smaller_var, 3, 1)
 
-        # --- theme selector ---
+        self.keep_orientation_var = tk.BooleanVar(
+            value=bool(self._opt("keep_orientation", True)))
+        self._add_check(opts, "Preserve orientation", self.keep_orientation_var, 4, 0)
+
         theme_row = ttk.Frame(opts)
-        theme_row.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+        theme_row.grid(row=5, column=0, columnspan=3, sticky="w", padx=4, pady=2)
         ttk.Label(theme_row, text="Theme:").pack(side="left", padx=(0, 6))
         for value, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
             radio = tk.Radiobutton(
@@ -229,36 +290,42 @@ class App(tk.Tk):
             radio.pack(side="left", padx=4)
             self._radio_widgets.append(radio)
 
-        ttk.Label(opts, text="Suffix:").grid(row=5, column=0, sticky="w", padx=4, pady=2)
-        self.suffix_var = tk.StringVar(value="")
+        ttk.Label(opts, text="Suffix:").grid(row=6, column=0, sticky="w", padx=4, pady=2)
+        self.suffix_var = tk.StringVar(value=str(self._opt("suffix", "")))
         ttk.Entry(opts, textvariable=self.suffix_var, width=16).grid(
-            row=5, column=1, sticky="w", padx=4, pady=2)
+            row=6, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Label(opts, text="Output folder (blank = in place):").grid(
-            row=6, column=0, sticky="w", padx=4, pady=2)
-        self.outdir_var = tk.StringVar(value="")
+            row=7, column=0, sticky="w", padx=4, pady=2)
+        self.outdir_var = tk.StringVar(value=str(self._opt("outdir", "")))
         ttk.Entry(opts, textvariable=self.outdir_var, width=40).grid(
-            row=6, column=1, sticky="we", padx=4, pady=2)
+            row=7, column=1, sticky="we", padx=4, pady=2)
         ttk.Button(opts, text="Browse", command=self.browse_outdir).grid(
-            row=6, column=2, padx=4, pady=2)
+            row=7, column=2, padx=4, pady=2)
+        ttk.Button(opts, text="Open", command=self.open_output).grid(
+            row=7, column=3, padx=(0, 4), pady=2)
         opts.columnconfigure(1, weight=1)
 
-        # --- run ---
         run_row = ttk.Frame(self)
         run_row.pack(fill="x", **pad)
         self.run_btn = ttk.Button(run_row, text="Strip Metadata", command=self.run)
         self.run_btn.pack(side="left", padx=2)
-        self.progress = ttk.Progressbar(run_row, mode="indeterminate")
+        self.progress = ttk.Progressbar(run_row, mode="determinate", maximum=1, value=0)
         self.progress.pack(side="left", fill="x", expand=True, padx=8)
+        self.cancel_btn = ttk.Button(run_row, text="Cancel", command=self.cancel_run,
+                                     state="disabled")
+        self.cancel_btn.pack(side="left", padx=2)
 
         self.hint = ttk.Label(self, text="")
         self.hint.pack(anchor="w", padx=6)
 
-        # --- log ---
+        self.status = ttk.Label(self, textvariable=self.status_var, anchor="w")
+        self.status.pack(fill="x", padx=6, pady=(0, 4))
+
         ttk.Label(self, text="Log:").pack(anchor="w", padx=6)
         log_frame = ttk.Frame(self)
         log_frame.pack(fill="both", expand=True, **pad)
-        self.log = tk.Text(log_frame, height=10, wrap="word", state="disabled")
+        self.log = tk.Text(log_frame, height=9, wrap="word", state="disabled")
         lsb = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         self.log.config(yscrollcommand=lsb.set)
         self.log.pack(side="left", fill="both", expand=True)
@@ -309,7 +376,6 @@ class App(tk.Tk):
                     lightcolor=p["window"], darkcolor=p["window"], relief="flat")
         s.map("TScrollbar", background=[("active", p["button_active"])])
 
-        # Classic tk widgets must be recolored explicitly.
         self.listbox.configure(
             background=p["base"], foreground=p["text"],
             selectbackground=p["select_bg"], selectforeground=p["select_fg"],
@@ -323,7 +389,6 @@ class App(tk.Tk):
             highlightbackground=p["border"], highlightcolor=p["accent"],
             highlightthickness=1, borderwidth=0, relief="flat")
 
-        # Classic tk check/radio buttons give a clear checkmark/dot.
         for widget in self._check_widgets + self._radio_widgets:
             widget.configure(
                 background=p["window"], foreground=p["text"],
@@ -340,8 +405,8 @@ class App(tk.Tk):
     def _on_theme_change(self):
         mode = self.theme_var.get()
         self.apply_theme(mode)
-        self.config["theme"] = mode
-        save_config(self.config)
+        self.config_data["theme"] = mode
+        save_config(self.config_data)
 
     def _cycle_theme(self):
         order = ["auto", "dark", "light"]
@@ -363,15 +428,32 @@ class App(tk.Tk):
         try:
             while True:
                 msg = self.log_queue.get_nowait()
-                if isinstance(msg, tuple) and msg and msg[0] == DONE:
-                    self._finish(msg[1])
+                if isinstance(msg, tuple):
+                    if msg and msg[0] == DONE:
+                        self._finish(msg[1])
+                    elif msg and msg[0] == "progress":
+                        _, index, total, name = msg
+                        self._set_progress(index, total, name)
+                    else:
+                        self.log_msg(str(msg))
                 else:
                     self.log_msg(msg)
         except queue.Empty:
             pass
         self._poll_id = self.after(100, self._poll_queue)
 
+    def _set_progress(self, index, total, name):
+        total = max(total, 1)
+        self.progress.configure(maximum=total, value=index)
+        if name:
+            self.status_var.set(f"{index}/{total}  {name}")
+        else:
+            self.status_var.set(f"{index}/{total}")
+
     # -- file selection -----------------------------------------------------
+    def _update_count(self):
+        self.files_label.config(text=f"Files to process: {len(self.files)}")
+
     def add_files(self):
         paths = filedialog.askopenfilenames(
             title="Select images",
@@ -383,29 +465,63 @@ class App(tk.Tk):
             if p not in self.files:
                 self.files.append(p)
                 self.listbox.insert("end", p)
+        self._update_count()
 
     def add_folder(self):
         d = filedialog.askdirectory(title="Select folder")
-        if d:
-            if d not in self.files:
-                self.files.append(d)
-                self.listbox.insert("end", d + "  [folder]")
+        if d and d not in self.files:
+            self.files.append(d)
+            self.listbox.insert("end", d + "  [folder]")
+        self._update_count()
 
     def remove_selected(self):
         for idx in list(self.listbox.curselection())[::-1]:
             self.listbox.delete(idx)
             del self.files[idx]
+        self._update_count()
 
     def clear_files(self):
         self.files.clear()
         self.listbox.delete(0, "end")
+        self._update_count()
 
     def browse_outdir(self):
         d = filedialog.askdirectory(title="Select output folder")
         if d:
             self.outdir_var.set(d)
 
+    def open_output(self):
+        d = self.outdir_var.get().strip() or self.last_output_dir
+        if not d or not os.path.isdir(d):
+            messagebox.showinfo("Output folder", "No output folder to open yet.")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(d)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", d])
+            else:
+                subprocess.Popen(["xdg-open", d])
+        except Exception as e:
+            messagebox.showerror("Open folder", str(e))
+
     # -- run ----------------------------------------------------------------
+    def _gather_options(self):
+        return {
+            "inputs": list(self.files),
+            "recursive": self.recursive_var.get(),
+            "outdir": self.outdir_var.get().strip() or None,
+            "suffix": self.suffix_var.get().strip(),
+            "backup": self.backup_var.get(),
+            "verify": self.verify_var.get(),
+            "keep_color": self.keep_color_var.get(),
+            "keep_orientation": self.keep_orientation_var.get(),
+            "dry": self.dryrun_var.get(),
+            "passthrough": self.passthrough_var.get(),
+            "skip_clean": self.skip_clean_var.get(),
+            "only_smaller": self.only_smaller_var.get(),
+        }
+
     def run(self):
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("Busy", "Already running.")
@@ -414,40 +530,43 @@ class App(tk.Tk):
             messagebox.showwarning("No files", "Add at least one file or folder first.")
             return
 
-        # Read Tk values in the main thread (Tk is not thread-safe).
-        options = {
-            "inputs": list(self.files),
-            "recursive": self.recursive_var.get(),
-            "outdir": self.outdir_var.get().strip() or None,
-            "suffix": self.suffix_var.get().strip(),
-            "backup": self.backup_var.get(),
-            "verify": self.verify_var.get(),
-            "keep_color": self.keep_color_var.get(),
-            "dry": self.dryrun_var.get(),
-            "passthrough": self.passthrough_var.get(),
-            "skip_clean": self.skip_clean_var.get(),
-            "only_smaller": self.only_smaller_var.get(),
-        }
+        options = self._gather_options()
         if options["passthrough"] and not options["outdir"]:
             messagebox.showwarning("Passthrough", "Passthrough requires an Output folder.")
             return
         if options["verify"] and not _si.have_pillow():
             messagebox.showwarning("Verify", "Pillow is not installed; disabling verification.")
             options["verify"] = False
+        if not options["outdir"] and not options["dry"]:
+            if not messagebox.askyesno(
+                    "Overwrite originals?",
+                    "No output folder is set, so the original files will be modified "
+                    "in place.\n\nContinue?"):
+                return
 
+        self._save_settings()
+        self.cancel_event.clear()
         self.run_btn.config(state="disabled")
-        self.progress.start(10)
+        self.cancel_btn.config(state="normal")
+        self.progress.configure(maximum=1, value=0)
+        self.status_var.set("Starting...")
         self.worker = threading.Thread(target=self._run_worker, args=(options,), daemon=True)
         self.worker.start()
 
+    def cancel_run(self):
+        if self.worker and self.worker.is_alive():
+            self.cancel_event.set()
+            self.cancel_btn.config(state="disabled")
+            self.status_var.set("Cancelling...")
+
     def _run_worker(self, options):
         try:
-            self.last_summary = self._process(options)
+            summary = self._process(options)
         except Exception as e:
             self.log_queue.put(f"ERROR: {e}")
-            self.last_summary = None
+            summary = None
         finally:
-            self.log_queue.put((DONE, getattr(self, "last_summary", None)))
+            self.log_queue.put((DONE, summary))
 
     def _process(self, options):
         inputs = options["inputs"]
@@ -457,6 +576,7 @@ class App(tk.Tk):
         backup = options["backup"]
         verify = options["verify"]
         keep_color = options["keep_color"]
+        keep_orientation = options["keep_orientation"]
         dry = options["dry"]
         passthrough = options["passthrough"]
         skip_clean = options["skip_clean"]
@@ -467,6 +587,8 @@ class App(tk.Tk):
         prefix_roots = len(dir_inputs) > 1
 
         entries = _si.collect_file_entries(inputs, recursive, exclude)
+        if outdir:
+            self.last_output_dir = outdir
         if not entries and not (passthrough and outdir):
             self.log_queue.put("No image files found.")
             return "none"
@@ -476,15 +598,24 @@ class App(tk.Tk):
             passthrough_entries = _si.collect_passthrough_entries(
                 inputs, recursive, prefix_roots, exclude)
 
-        self.log_queue.put(f"Processing {len(entries)} image file(s)...")
+        total = len(entries)
+        self.log_queue.put(f"Processing {total} image file(s)...")
+        self.log_queue.put(("progress", 0, total, ""))
         total_saved = 0
         ok = 0
         skipped = 0
         fail = 0
+        cancelled = False
 
-        for fp, base_dir in entries:
+        for index, (fp, base_dir) in enumerate(entries, 1):
+            if self.cancel_event.is_set():
+                cancelled = True
+                break
+
+            self.log_queue.put(("progress", index - 1, total, os.path.basename(fp)))
             try:
-                new_data, orig_size, changed = _si.strip_file(fp, keep_color)
+                new_data, orig_size, changed = _si.strip_file(
+                    fp, keep_color, keep_orientation)
             except Exception as e:
                 self.log_queue.put(f"FAIL {fp}: {e}")
                 fail += 1
@@ -526,7 +657,6 @@ class App(tk.Tk):
 
             try:
                 if backup and out_path == fp:
-                    import shutil
                     shutil.copy2(fp, fp + ".bak")
                 _si.write_file_atomic(out_path, new_data, keep_stat_from=fp)
                 self.log_queue.put(
@@ -536,34 +666,52 @@ class App(tk.Tk):
                 self.log_queue.put(f"WRITE FAIL {fp}: {e}")
                 fail += 1
 
-        if passthrough_entries:
-            if dry:
-                self.log_queue.put(
-                    f"Passthrough: would copy {len(passthrough_entries)} non-image file(s).")
-            else:
-                try:
-                    n = _si.copy_passthrough(passthrough_entries, outdir)
-                    self.log_queue.put(f"Passthrough: copied {n} non-image file(s).")
-                except Exception as e:
-                    self.log_queue.put(f"PASSTHROUGH FAIL: {e}")
-                    fail += 1
+        if cancelled:
+            self.log_queue.put("Cancelled by user.")
+        else:
+            if passthrough_entries:
+                if dry:
+                    self.log_queue.put(
+                        f"Passthrough: would copy {len(passthrough_entries)} non-image file(s).")
+                else:
+                    try:
+                        n = _si.copy_passthrough(passthrough_entries, outdir)
+                        self.log_queue.put(f"Passthrough: copied {n} non-image file(s).")
+                    except Exception as e:
+                        self.log_queue.put(f"PASSTHROUGH FAIL: {e}")
+                        fail += 1
 
+        if not cancelled:
+            self.log_queue.put(("progress", total, total, ""))
         self.log_queue.put(
             f"\nDone: {ok} ok, {skipped} skipped, {fail} failed, "
             f"total saved {total_saved} bytes")
-        return (ok, skipped, fail, total_saved)
+        return (ok, skipped, fail, total_saved, cancelled)
 
     def _finish(self, summary):
-        self.progress.stop()
         self.run_btn.config(state="normal")
+        self.cancel_btn.config(state="disabled")
+        self._save_settings()
+
         if summary == "none":
+            self.status_var.set("No image files found")
             messagebox.showwarning("No files", "No image files found in the selected inputs.")
         elif isinstance(summary, tuple):
-            ok, skipped, fail, saved = summary
-            messagebox.showinfo(
-                "Finished",
-                f"Done: {ok} ok, {skipped} skipped, {fail} failed.\n"
-                f"Total saved: {saved} bytes.")
+            ok, skipped, fail, saved, cancelled = summary
+            state = "Cancelled" if cancelled else "Finished"
+            self.status_var.set(
+                f"{state}: {ok} ok, {skipped} skipped, {fail} failed, "
+                f"{saved} bytes saved")
+            if cancelled:
+                messagebox.showinfo(
+                    "Cancelled",
+                    f"Stopped after {ok} file(s).\n"
+                    f"Skipped: {skipped}   Failed: {fail}\nSaved: {saved} bytes.")
+            else:
+                messagebox.showinfo(
+                    "Finished",
+                    f"Done: {ok} ok, {skipped} skipped, {fail} failed.\n"
+                    f"Total saved: {saved} bytes.")
 
 
 def main():
