@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-11-05
+
+### Added
+- `--manifest FILE` writes a CSV of source/output paths, sizes, SHA-256,
+  tool, and status for every processed file.
+- `--verify-manifest FILE` re-hashes recorded outputs and fails on any
+  size/hash mismatch or missing file.
+- `--dedupe` finds exact duplicate images and replaces them with hardlinks
+  (same filesystem), with `--dry-run` reporting.
+
 ## [1.5.0] - 2026-11-05
 
 ### Added

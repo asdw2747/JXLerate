@@ -1,6 +1,6 @@
 # strip-images
 
-**Version 1.5.0**
+**Version 1.6.0**
 
 Losslessly strip unnecessary metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and
 `.gif` files while keeping the actual image pixel data bit-for-bit identical.
@@ -78,8 +78,27 @@ For much larger savings, `--to-jxl` converts to JPEG XL (requires `cjxl`/`djxl`)
   and it disables `--verify` (which compares pixels exactly).
   PNG/GIF are not lossily re-encoded.
 
-External tools are optional: missing ones are skipped automatically. Only
-`oxipng`/`optipng`, `jpegtran`, and Pillow are used for optimization.
+### Integrity manifest
+
+- `--manifest FILE` writes a CSV with the source/output paths, sizes, SHA-256
+  of the output, tool used, and status (`written`, `dry-run`, `skipped`, …).
+- `--verify-manifest FILE` re-hashes every recorded output and exits non-zero
+  on any size/hash mismatch or missing file.
+
+This is useful for long-term archives: keep the manifest next to the images
+and re-run `--verify-manifest` periodically.
+
+### Deduplication
+
+- `--dedupe -r DIR` hashes image files and replaces exact duplicates with
+  **hardlinks** (same filesystem only), freeing duplicate storage instantly.
+- `--dedupe --dry-run` reports what would be linked.
+- Symlinks are never replaced. Standalone action; cannot be combined with
+  stripping/transcoding options.
+
+External tools are optional: missing ones are skipped automatically.
+Optimization uses `oxipng`/`optipng`, `jpegtran`, and Pillow; JXL uses
+`cjxl`/`djxl`.
 
 ## Install / use
 
@@ -104,6 +123,9 @@ Options:
 - `--lossy-quality N` LOSSY JPEG/WebP re-encode (off by default; changes pixels)
 - `--to-jxl` losslessly transcode to JPEG XL (requires `cjxl`/`djxl`)
 - `--replace` with `--to-jxl`, delete originals after verified conversion
+- `--manifest FILE` write a SHA-256 CSV manifest of results
+- `--verify-manifest FILE` verify a manifest and exit
+- `--dedupe` hardlink duplicate images and exit (use with `-r`)
 - `--skip-clean` do not write files that already have no metadata to strip
 - `--only-if-smaller` only write when the result is smaller (implies skip-clean)
 - `--suffix S` append suffix to filenames

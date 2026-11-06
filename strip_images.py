@@ -17,6 +17,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
 import io
 import os
 import shutil
@@ -27,7 +29,7 @@ import sys
 import tempfile
 import zlib
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
@@ -997,6 +999,110 @@ def copy_passthrough(entries, output_dir):
 
 
 # ---------------------------------------------------------------------------
+# Integrity manifest / deduplication
+# ---------------------------------------------------------------------------
+
+MANIFEST_FIELDS = ["source", "output", "source_size", "output_size",
+                   "sha256", "tool", "status"]
+
+
+def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_manifest(path: str, rows) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(MANIFEST_FIELDS)
+        writer.writerows(rows)
+
+
+def verify_manifest(path: str) -> tuple[int, int]:
+    """Return (checked, failures)."""
+    checked = 0
+    failures = 0
+    base = os.path.dirname(os.path.abspath(path))
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            output = row.get("output") or ""
+            digest = row.get("sha256") or ""
+            if not output or not digest:
+                continue
+            if not os.path.isabs(output):
+                output = os.path.join(base, output)
+            checked += 1
+            try:
+                size = os.path.getsize(output)
+                if str(size) != (row.get("output_size") or ""):
+                    print(f"MISMATCH {output}: size {size}", file=sys.stderr)
+                    failures += 1
+                    continue
+                actual = sha256_file(output)
+                if actual != digest:
+                    print(f"MISMATCH {output}: sha256", file=sys.stderr)
+                    failures += 1
+            except Exception as e:
+                print(f"MISSING {output}: {e}", file=sys.stderr)
+                failures += 1
+    return checked, failures
+
+
+def dedupe_entries(entries, dry_run: bool = False) -> tuple[int, int, int]:
+    """Hardlink duplicate files. Returns (links, saved_bytes, failures)."""
+    by_hash = {}
+    links = 0
+    saved = 0
+    failures = 0
+
+    for fp, _ in entries:
+        if os.path.islink(fp):
+            continue  # never replace a symlink with a hardlink
+        try:
+            size = os.path.getsize(fp)
+            digest = sha256_file(fp)
+        except Exception as e:
+            print(f"FAIL {fp}: {e}", file=sys.stderr)
+            failures += 1
+            continue
+
+        keeper = by_hash.get(digest)
+        if keeper is None:
+            by_hash[digest] = fp
+            continue
+
+        try:
+            if os.path.samefile(keeper, fp):
+                continue
+        except Exception:
+            pass
+
+        if dry_run:
+            print(f"DUP {fp} == {keeper} (would save {size} bytes)")
+            links += 1
+            saved += size
+            continue
+
+        try:
+            folder = os.path.dirname(os.path.abspath(fp)) or "."
+            tmp = os.path.join(folder, f".dedupe-{os.getpid()}-{links}")
+            os.link(keeper, tmp)
+            os.replace(tmp, fp)
+            print(f"LINK {fp} -> {keeper} (saved {size} bytes)")
+            links += 1
+            saved += size
+        except Exception as e:
+            print(f"FAIL {fp}: {e}", file=sys.stderr)
+            failures += 1
+
+    return links, saved, failures
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1005,7 +1111,7 @@ def main():
         description="Losslessly strip metadata from PNG/JPEG/WebP/GIF files.")
     ap.add_argument("--version", action="version",
                     version=f"%(prog)s {__version__}")
-    ap.add_argument("inputs", nargs="+", help="files or directories")
+    ap.add_argument("inputs", nargs="*", help="files or directories")
     ap.add_argument("-r", "--recursive", action="store_true", help="recurse into directories")
     ap.add_argument("-o", "--output-dir", help="write stripped files into this directory (mirrors structure)")
     ap.add_argument("--suffix", default="", help="append suffix to basename before extension (e.g. _stripped)")
@@ -1028,6 +1134,12 @@ def main():
                     help="losslessly transcode to JPEG XL (.jxl)")
     ap.add_argument("--replace", action="store_true",
                     help="with --to-jxl, delete originals after verified conversion")
+    ap.add_argument("--manifest", metavar="FILE",
+                    help="write a SHA-256 CSV manifest of results")
+    ap.add_argument("--verify-manifest", metavar="FILE",
+                    help="verify an existing manifest and exit")
+    ap.add_argument("--dedupe", action="store_true",
+                    help="hardlink duplicate image files and exit")
     ap.add_argument("--passthrough", action="store_true",
                     help="copy non-image files into the output folder too (requires -o)")
     ap.add_argument("--skip-clean", action="store_true",
@@ -1057,6 +1169,25 @@ def main():
     if args.to_jxl and not (shutil.which("cjxl") and shutil.which("djxl")):
         ap.error("--to-jxl requires cjxl and djxl (JPEG XL tools)")
 
+    if args.verify_manifest:
+        checked, failures = verify_manifest(args.verify_manifest)
+        print(f"Manifest: {checked} file(s) checked, {failures} failure(s)",
+              file=sys.stderr)
+        sys.exit(1 if failures else 0)
+
+    if not args.inputs:
+        ap.error("the following arguments are required: inputs")
+
+    if args.dedupe:
+        if args.to_jxl or args.optimize or args.lossy_quality is not None \
+                or args.output_dir or args.manifest:
+            ap.error("--dedupe cannot be combined with processing options")
+        entries = collect_file_entries(args.inputs, args.recursive)
+        links, saved, failures = dedupe_entries(entries, args.dry_run)
+        print(f"Dedupe: {links} hardlink(s), {saved} bytes saved, "
+              f"{failures} failure(s)", file=sys.stderr)
+        sys.exit(1 if failures else 0)
+
     output_dir = os.path.abspath(args.output_dir) if args.output_dir else None
     exclude_dir = output_dir
     dir_inputs = [p for p in args.inputs if os.path.isdir(p)]
@@ -1076,6 +1207,26 @@ def main():
     ok = 0
     skipped = 0
     fail = 0
+    manifest_rows = []
+
+    manifest_dir = (os.path.dirname(os.path.abspath(args.manifest))
+                    if args.manifest else "")
+
+    def manifest_path(path):
+        return os.path.relpath(os.path.abspath(path), manifest_dir)
+
+    def add_manifest(source, output, source_size, output_size, digest,
+                     tool, status):
+        if args.manifest:
+            manifest_rows.append([
+                manifest_path(source),
+                manifest_path(output) if output else "",
+                source_size,
+                output_size,
+                digest,
+                tool,
+                status,
+            ])
 
     for fp, base_dir in entries:
         if args.to_jxl:
@@ -1085,12 +1236,14 @@ def main():
                     args.max_effort)
             except Exception as e:
                 print(f"FAIL {fp}: {e}", file=sys.stderr)
+                add_manifest(fp, "", 0, 0, "", "cjxl", "failed")
                 fail += 1
                 continue
 
             if jxl is None:
                 if not args.quiet:
                     print(f"SKIP {fp}: {note}")
+                add_manifest(fp, "", orig_size, 0, "", "cjxl", f"skipped: {note}")
                 skipped += 1
                 continue
 
@@ -1099,14 +1252,19 @@ def main():
             if os.path.exists(out_path):
                 if not args.quiet:
                     print(f"SKIP {fp}: {out_path} already exists")
+                add_manifest(fp, out_path, orig_size, 0, "", "cjxl",
+                             "skipped: exists")
                 skipped += 1
                 continue
 
             saved = orig_size - len(jxl)
+            digest = hashlib.sha256(jxl).hexdigest()
             if args.dry_run:
                 if not args.quiet:
                     print(f"{fp}: {orig_size} -> {len(jxl)} bytes "
                           f"(saved {saved}) [cjxl] -> {out_path}")
+                add_manifest(fp, out_path, orig_size, len(jxl), digest,
+                             "cjxl", "dry-run")
                 total_saved += saved
                 ok += 1
                 continue
@@ -1119,9 +1277,13 @@ def main():
                     os.remove(fp)
             except Exception as e:
                 print(f"WRITE FAIL {fp}: {e}", file=sys.stderr)
+                add_manifest(fp, out_path, orig_size, len(jxl), digest,
+                             "cjxl", "failed")
                 fail += 1
                 continue
 
+            add_manifest(fp, out_path, orig_size, len(jxl), digest,
+                         "cjxl", "written")
             total_saved += saved
             if not args.quiet:
                 print(f"{fp}: {orig_size} -> {len(jxl)} bytes "
@@ -1136,6 +1298,7 @@ def main():
                 args.lossy_quality)
         except Exception as e:
             print(f"FAIL {fp}: {e}", file=sys.stderr)
+            add_manifest(fp, "", 0, 0, "", "metadata", "failed")
             fail += 1
             continue
 
@@ -1149,11 +1312,13 @@ def main():
         if skip_reason:
             if not args.quiet:
                 print(f"SKIP {fp}: {skip_reason}")
+            add_manifest(fp, "", orig_size, 0, "", tool, f"skipped: {skip_reason}")
             skipped += 1
             continue
 
         if args.verify and not verify_lossless(fp, new_data):
             print(f"VERIFY FAILED {fp}: pixels differ or output is invalid!", file=sys.stderr)
+            add_manifest(fp, "", orig_size, len(new_data), "", tool, "verify-failed")
             fail += 1
             continue
 
@@ -1169,10 +1334,13 @@ def main():
         else:
             out_path = fp
 
+        digest = hashlib.sha256(new_data).hexdigest()
         if args.dry_run:
             if not args.quiet:
                 print(f"{fp}: {orig_size} -> {len(new_data)} bytes "
                       f"(saved {saved}) [{tool}]")
+            add_manifest(fp, out_path, orig_size, len(new_data), digest,
+                         tool, "dry-run")
             ok += 1
             continue
 
@@ -1182,9 +1350,13 @@ def main():
             write_file_atomic(out_path, new_data, keep_stat_from=fp)
         except Exception as e:
             print(f"WRITE FAIL {fp}: {e}", file=sys.stderr)
+            add_manifest(fp, out_path, orig_size, len(new_data), digest,
+                         tool, "failed")
             fail += 1
             continue
 
+        add_manifest(fp, out_path, orig_size, len(new_data), digest,
+                     tool, "written")
         if not args.quiet:
             print(f"{fp}: {orig_size} -> {len(new_data)} bytes "
                   f"(saved {saved}) [{tool}] -> {out_path}")
@@ -1203,6 +1375,11 @@ def main():
             except Exception as e:
                 print(f"PASSTHROUGH FAIL: {e}", file=sys.stderr)
                 fail += 1
+
+    if args.manifest:
+        write_manifest(args.manifest, manifest_rows)
+        print(f"Manifest: wrote {len(manifest_rows)} row(s) to {args.manifest}",
+              file=sys.stderr)
 
     print(f"\nDone: {ok} ok, {skipped} skipped, {fail} failed, "
           f"total saved {total_saved} bytes", file=sys.stderr)
