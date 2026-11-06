@@ -1,6 +1,6 @@
 # JXLerate
 
-**Version 2.0.0**
+**Version 2.0.1**
 
 JXLerate is a lossless image archiver and optimizer. It removes unnecessary
 metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly
@@ -56,6 +56,7 @@ pixel-lossless recompression:
   - JPEG via `jpegtran -optimize`; typically **5–8% smaller**.
   - Lossless WebP re-encoded when it is already lossless.
   - Only replaces the result when it is smaller; combine with `--verify`.
+  - Retained orientation and requested color-profile metadata are preserved.
 - `--max-effort` — slower/better PNG compression (zopfli; can take minutes).
 - `--progressive` — write progressive JPEGs when optimizing (~10% on photos,
   compared with ~7% for baseline optimization).
@@ -81,7 +82,8 @@ For much larger savings, `--to-jxl` converts to JPEG XL (requires `cjxl`/`djxl`)
 - `--lossy-quality N` re-encodes JPEG (and static WebP) at quality 1–100.
   This permanently discards detail. It is never used unless explicitly requested,
   and it disables `--verify` (which compares pixels exactly).
-  PNG/GIF are not lossily re-encoded.
+  With `--keep-color`, JPEG/WebP ICC profiles are retained. PNG/GIF are not
+  lossily re-encoded; requesting lossy mode for them reports an error.
 
 ### Integrity manifest
 
@@ -89,6 +91,8 @@ For much larger savings, `--to-jxl` converts to JPEG XL (requires `cjxl`/`djxl`)
   of the output, tool used, and status (`written`, `dry-run`, `skipped`, …).
 - `--verify-manifest FILE` re-hashes every recorded output and exits non-zero
   on any size/hash mismatch or missing file.
+- Manifest paths are checked before processing so a manifest cannot overwrite
+  an input or planned output. Invalid/empty manifests fail verification.
 
 This is useful for long-term archives: keep the manifest next to the images
 and re-run `--verify-manifest` periodically.
@@ -98,6 +102,9 @@ and re-run `--verify-manifest` periodically.
 - `--dedupe -r DIR` hashes image files and replaces exact duplicates with
   **hardlinks** (same filesystem only), freeing duplicate storage instantly.
 - `--dedupe --dry-run` reports what would be linked.
+- Files are linked only when mode, owner/group, modification time, and extended
+  attributes match. Hardlinked paths share later content/metadata changes;
+  access time is shared and creating a link changes ctime.
 - Symlinks are never replaced. Standalone action; cannot be combined with
   stripping/transcoding options.
 
@@ -138,8 +145,8 @@ Options:
 - `--suffix S` append suffix to filenames
 - `--backup` keep a `.bak` of the original (in-place mode)
 - `--dry-run` report savings without writing
-- `--verify` decode original and result with Pillow and compare pixels
-  (all frames of animated files are checked)
+- `--verify` decode original and result with Pillow and compare frames, plus
+  preserved orientation/color metadata (all frames of animated files are checked)
 - `-q, --quiet` suppress per-file output
 - `--version` print the version number and exit
 
@@ -147,6 +154,8 @@ Skipped files are not written to the output folder either, so with `-o` you
 get only the files that actually changed. When several input folders are given,
 each folder keeps its own name in the output tree so same-named files cannot
 overwrite each other.
+Explicit file inputs that map to the same output name are rejected before any
+files are written.
 
 ## GUI
 
@@ -189,6 +198,17 @@ Optional, used only for the matching features:
 - **oxipng** / **optipng** — PNG optimization
 - **jpegtran** — JPEG optimization
 - **cjxl** / **djxl** — JPEG XL conversion
+
+## Tests
+
+Run the regression suite with:
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+Image tests skip when Pillow is unavailable; PNG optimizer coverage also skips
+when `oxipng` is not installed.
 
 ## License
 

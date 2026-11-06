@@ -31,7 +31,7 @@ import sys
 import tempfile
 import zlib
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
@@ -67,6 +67,8 @@ GIF_APP_ICC = b"ICCRGBG1012"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 ORIENTATION_TAG = 0x0112
+PIL_COLOR_INFO_KEYS = (
+    "icc_profile", "gamma", "chromaticity", "srgb", "cicp", "mdcv", "clli")
 
 
 # ---------------------------------------------------------------------------
@@ -538,8 +540,10 @@ def _optimize_png(data: bytes, max_effort: bool) -> tuple[bytes | None, str | No
             path = os.path.join(td, "image.png")
             with open(path, "wb") as f:
                 f.write(data)
-            cmd = [oxipng, "-o", "6" if max_effort else "4",
-                   "--strip", "safe", "--quiet"]
+            # Metadata has already been filtered by strip_png(). Do not ask
+            # oxipng to strip more chunks here: --strip safe removes eXIf,
+            # which can contain the orientation we intentionally retained.
+            cmd = [oxipng, "-o", "6" if max_effort else "4", "--quiet"]
             if max_effort:
                 cmd.append("--zopfli")
             cmd.append(path)
@@ -601,6 +605,9 @@ def _optimize_webp(data: bytes, keep_color: bool) -> tuple[bytes | None, str | N
             kwargs = {"lossless": True, "quality": 100, "method": 6}
             if keep_color and im.info.get("icc_profile"):
                 kwargs["icc_profile"] = im.info["icc_profile"]
+            exif = im.getexif()
+            if exif.get(ORIENTATION_TAG):
+                kwargs["exif"] = exif.tobytes()
             out = io.BytesIO()
             im.save(out, "WEBP", **kwargs)
         candidate = out.getvalue()
@@ -626,26 +633,32 @@ def optimize_bytes(data: bytes, ext: str, keep_color: bool = False,
 
 
 def _lossy_bytes(data: bytes, ext: str, quality: int,
-                 keep_orientation: bool = True) -> tuple[bytes | None, str | None]:
+                 keep_orientation: bool = True,
+                 keep_color: bool = False) -> tuple[bytes, str]:
     """Re-encode lossily (JPEG/WebP only). Pixels WILL change."""
     try:
         from PIL import Image
-    except Exception:
-        return None, None
+    except Exception as exc:
+        raise RuntimeError("Pillow is required for lossy re-encoding") from exc
 
     ext = ext.lower()
+    if ext not in (".jpg", ".jpeg", ".webp"):
+        raise ValueError("lossy re-encoding supports JPEG and WebP only")
     try:
         with Image.open(io.BytesIO(data)) as im:
             im.load()
             if getattr(im, "is_animated", False):
-                return None, None
+                raise ValueError("lossy re-encoding does not support animated images")
             exif = im.getexif()
             keep_exif = bool(keep_orientation and exif.get(ORIENTATION_TAG))
+            icc_profile = im.info.get("icc_profile") if keep_color else None
 
             if ext in (".jpg", ".jpeg"):
                 kwargs = {"quality": quality, "optimize": True, "progressive": True}
                 if keep_exif:
                     kwargs["exif"] = exif.tobytes()
+                if icc_profile:
+                    kwargs["icc_profile"] = icc_profile
                 out = io.BytesIO()
                 im.save(out, "JPEG", **kwargs)
                 return out.getvalue(), f"lossy-jpeg q{quality}"
@@ -654,12 +667,16 @@ def _lossy_bytes(data: bytes, ext: str, quality: int,
                 kwargs = {"quality": quality, "method": 6}
                 if keep_exif:
                     kwargs["exif"] = exif.tobytes()
+                if icc_profile:
+                    kwargs["icc_profile"] = icc_profile
                 out = io.BytesIO()
                 im.save(out, "WEBP", **kwargs)
                 return out.getvalue(), f"lossy-webp q{quality}"
-    except Exception:
-        return None, None
-    return None, None
+    except (RuntimeError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"lossy re-encoding failed: {exc}") from exc
+    raise ValueError("unsupported lossy image format")
 
 
 def process_file(path: str, keep_color: bool = False,
@@ -674,14 +691,20 @@ def process_file(path: str, keep_color: bool = False,
     tool = "metadata"
 
     if lossy_quality is not None:
-        candidate, name = _lossy_bytes(data, ext, lossy_quality, keep_orientation)
+        candidate, name = _lossy_bytes(
+            data, ext, lossy_quality, keep_orientation, keep_color)
         if candidate is not None and len(candidate) < len(data):
             data, tool = candidate, name
         elif optimize:
-            candidate, name = optimize_bytes(
+            lossy_name = name
+            candidate, optimize_name = optimize_bytes(
                 data, ext, keep_color, max_effort, progressive)
             if candidate is not None and len(candidate) < len(data):
-                data, tool = candidate, name
+                data, tool = candidate, optimize_name
+            else:
+                tool = f"{lossy_name} not smaller; metadata only"
+        else:
+            tool = f"{name} not smaller; metadata only"
     elif optimize:
         candidate, name = optimize_bytes(
             data, ext, keep_color, max_effort, progressive)
@@ -711,17 +734,9 @@ def _is_animated(data: bytes, ext: str) -> bool:
     return False
 
 
-def _pixels_equal_bytes(a: bytes, b: bytes) -> bool:
-    try:
-        from PIL import Image
-        with Image.open(io.BytesIO(a)) as im1, Image.open(io.BytesIO(b)) as im2:
-            return _frame_signatures(im1) == _frame_signatures(im2)
-    except Exception:
-        return False
-
-
 def _transcode_jxl(data: bytes, ext: str,
-                   max_effort: bool) -> tuple[bytes | None, str]:
+                   max_effort: bool, keep_color: bool = False,
+                   keep_orientation: bool = True) -> tuple[bytes | None, str]:
     cjxl = shutil.which("cjxl")
     djxl = shutil.which("djxl")
     if not cjxl or not djxl:
@@ -779,8 +794,9 @@ def _transcode_jxl(data: bytes, ext: str,
             if not _run_tool([djxl, dst, recon], 300):
                 return None, "djxl verification failed"
             with open(recon, "rb") as f:
-                if not _pixels_equal_bytes(data, f.read()):
-                    return None, "pixel verification failed"
+                if not verify_image_bytes(data, f.read(), keep_color,
+                                          keep_orientation):
+                    return None, "pixel/orientation/color verification failed"
 
         return jxl, "cjxl"
 
@@ -797,7 +813,8 @@ def to_jxl_file(path: str, keep_color: bool = False,
     if ext.lower() not in (".jpg", ".jpeg") and _is_animated(data, ext):
         return None, len(original), "animated input not supported for JXL"
 
-    jxl, note = _transcode_jxl(data, ext, max_effort)
+    jxl, note = _transcode_jxl(
+        data, ext, max_effort, keep_color, keep_orientation)
     if jxl is None:
         return None, len(original), note
     if len(jxl) >= len(data):
@@ -836,16 +853,64 @@ def _frame_signatures(image) -> list:
 
     signatures = []
     for frame in ImageSequence.Iterator(image):
+        # Optimizers may losslessly change PNG storage type (for example RGB
+        # to palette). Compare decoded 8-bit color values, not Pillow's storage
+        # mode. Keep higher-depth/other modes raw to avoid quantizing them.
+        if frame.mode in ("1", "L", "P", "LA", "RGB", "RGBA"):
+            pixels = frame.convert("RGBA")
+            mode = "RGBA"
+        else:
+            pixels = frame
+            mode = frame.mode
         signatures.append((
-            frame.mode,
+            mode,
             frame.size,
-            hashlib.sha256(frame.tobytes()).hexdigest(),
+            hashlib.sha256(pixels.tobytes()).hexdigest(),
         ))
     return signatures
 
 
-def verify_lossless(orig_path: str, new_data: bytes) -> bool:
-    """Return True only if the stripped bytes decode to identical pixels.
+def verify_image_bytes(original_data: bytes, result_data: bytes,
+                       keep_color: bool = False,
+                       keep_orientation: bool = True) -> bool:
+    """Compare decoded frames and explicitly preserved orientation/color data."""
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(original_data)) as original:
+            original.load()
+            original_frames = _frame_signatures(original)
+            original_orientation = original.getexif().get(ORIENTATION_TAG)
+            if original_orientation not in range(2, 9):
+                original_orientation = None
+            original_metadata = {
+                "orientation": original_orientation if keep_orientation else None,
+                "color": {k: original.info[k] for k in
+                          PIL_COLOR_INFO_KEYS
+                          if keep_color and k in original.info},
+            }
+        with Image.open(io.BytesIO(result_data)) as result:
+            result.load()
+            result_frames = _frame_signatures(result)
+            result_orientation = result.getexif().get(ORIENTATION_TAG)
+            if result_orientation not in range(2, 9):
+                result_orientation = None
+            if not keep_orientation:
+                result_orientation = None
+            result_color = {k: result.info[k] for k in
+                            PIL_COLOR_INFO_KEYS
+                            if keep_color and k in result.info}
+            result_metadata = {"orientation": result_orientation,
+                               "color": result_color}
+        return (original_frames == result_frames and
+                original_metadata["orientation"] == result_metadata["orientation"] and
+                original_metadata["color"] == result_metadata["color"])
+    except Exception:
+        return False
+
+
+def verify_lossless(orig_path: str, new_data: bytes, keep_color: bool = False,
+                    keep_orientation: bool = True) -> bool:
+    """Return True only if output frames and requested metadata are preserved.
 
     Verifies every frame of animated files. Returns False (never silently
     True) on decode errors or mismatches. Raises RuntimeError if Pillow is
@@ -857,15 +922,11 @@ def verify_lossless(orig_path: str, new_data: bytes) -> bool:
         raise RuntimeError("Pillow is required for verification") from exc
 
     try:
-        with Image.open(orig_path) as im:
-            im.load()
-            orig = _frame_signatures(im)
-        with Image.open(io.BytesIO(new_data)) as im2:
-            im2.load()
-            new = _frame_signatures(im2)
+        with open(orig_path, "rb") as f:
+            original_data = f.read()
     except Exception:
         return False
-    return orig == new
+    return verify_image_bytes(original_data, new_data, keep_color, keep_orientation)
 
 
 def write_file_atomic(path: str, data: bytes, keep_stat_from: str | None = None) -> None:
@@ -937,7 +998,7 @@ def collect_file_entries(inputs, recursive, exclude_dir=None):
                     fp = os.path.join(p, nm)
                     if os.path.isfile(fp) and _is_image(nm):
                         entries.append((fp, base))
-        elif os.path.isfile(p):
+        elif os.path.isfile(p) and _is_image(p):
             entries.append((p, None))
     return entries
 
@@ -960,6 +1021,77 @@ def output_path_for(fp, base_dir, output_dir, suffix, prefix_roots):
         stem, ext = os.path.splitext(name)
         rel = os.path.join(folder, stem + suffix + ext)
     return os.path.join(output_dir, rel)
+
+
+def canonical_path(path: str) -> str:
+    """Normalize a path for collision checks, resolving existing symlinks."""
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
+def validate_output_plan(output_pairs, source_paths, manifest_path=None) -> None:
+    """Fail before processing if outputs would collide with each other/inputs."""
+    source_keys = {canonical_path(path) for path in source_paths}
+    destinations = {}
+
+    for source, destination in output_pairs:
+        source_key = canonical_path(source)
+        destination_key = canonical_path(destination)
+
+        if destination_key in destinations:
+            other = destinations[destination_key]
+            raise ValueError(
+                f"multiple inputs map to the same output: {other} and {source} "
+                f"-> {destination}")
+        destinations[destination_key] = source
+
+        if destination_key in source_keys and destination_key != source_key:
+            raise ValueError(
+                f"output for {source} would overwrite a different input: {destination}")
+
+    if manifest_path:
+        manifest_key = canonical_path(manifest_path)
+        if manifest_key in source_keys:
+            raise ValueError(f"manifest path would overwrite an input: {manifest_path}")
+        if manifest_key in destinations:
+            raise ValueError(f"manifest path conflicts with an output: {manifest_path}")
+        # realpath does not collapse hardlinks; opening the manifest for write
+        # would truncate every hardlink to the same inode, including an input.
+        for source in source_paths:
+            try:
+                if os.path.samefile(manifest_path, source):
+                    raise ValueError(
+                        f"manifest path is a hardlink to an input: {manifest_path}")
+            except OSError:
+                pass
+        for _, destination in output_pairs:
+            try:
+                if os.path.samefile(manifest_path, destination):
+                    raise ValueError(
+                        f"manifest path is a hardlink to an output: {manifest_path}")
+            except OSError:
+                pass
+
+
+def validate_manifest_location(manifest_path, inputs) -> None:
+    """Do not overwrite an existing file inside an input tree as the manifest."""
+    if manifest_path and os.path.isdir(manifest_path):
+        raise ValueError(f"manifest path is a directory: {manifest_path}")
+    if not manifest_path or not os.path.exists(manifest_path):
+        return
+    manifest_key = canonical_path(manifest_path)
+    for path in inputs:
+        if os.path.isfile(path) and canonical_path(path) == manifest_key:
+            raise ValueError(f"manifest path would overwrite an input: {manifest_path}")
+        if os.path.isdir(path):
+            root = canonical_path(path)
+            try:
+                common = os.path.commonpath((root, manifest_key))
+            except ValueError:
+                continue
+            if common == root:
+                raise ValueError(
+                    f"manifest path is inside an input folder and would overwrite "
+                    f"an existing file: {manifest_path}")
 
 
 def collect_passthrough_entries(inputs, recursive, prefix_roots, exclude_dir=None):
@@ -994,6 +1126,8 @@ def copy_passthrough(entries, output_dir):
     count = 0
     for src, rel in entries:
         dst = os.path.join(output_dir, rel)
+        if canonical_path(src) == canonical_path(dst):
+            continue
         os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
         shutil.copy2(src, dst)
         count += 1
@@ -1016,6 +1150,20 @@ def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
+def _hardlink_metadata_signature(path: str):
+    """Metadata that would become shared if two paths were hardlinked."""
+    st = os.stat(path)
+    xattrs = ()
+    if hasattr(os, "listxattr") and hasattr(os, "getxattr"):
+        try:
+            xattrs = tuple((name, os.getxattr(path, name))
+                           for name in sorted(os.listxattr(path)))
+        except OSError:
+            return None
+    return (stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid,
+            st.st_mtime_ns, xattrs)
+
+
 def write_manifest(path: str, rows) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -1028,29 +1176,76 @@ def verify_manifest(path: str) -> tuple[int, int]:
     checked = 0
     failures = 0
     base = os.path.dirname(os.path.abspath(path))
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            output = row.get("output") or ""
-            digest = row.get("sha256") or ""
-            if not output or not digest:
-                continue
-            if not os.path.isabs(output):
-                output = os.path.join(base, output)
-            checked += 1
-            try:
-                size = os.path.getsize(output)
-                if str(size) != (row.get("output_size") or ""):
-                    print(f"MISMATCH {output}: size {size}", file=sys.stderr)
+    rows_seen = 0
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames or any(
+                    field not in reader.fieldnames for field in MANIFEST_FIELDS):
+                print(f"INVALID MANIFEST {path}: missing or invalid header",
+                      file=sys.stderr)
+                return 0, 1
+
+            for row in reader:
+                rows_seen += 1
+                if None in row:
+                    print(f"INVALID MANIFEST {path}: malformed row {rows_seen + 1}",
+                          file=sys.stderr)
                     failures += 1
                     continue
-                actual = sha256_file(output)
-                if actual != digest:
-                    print(f"MISMATCH {output}: sha256", file=sys.stderr)
+
+                status = row.get("status") or ""
+                if status.startswith("skipped:"):
+                    continue
+                if status == "dry-run":
+                    print(f"UNVERIFIED {row.get('source')}: dry-run output was not written",
+                          file=sys.stderr)
                     failures += 1
-            except Exception as e:
-                print(f"MISSING {output}: {e}", file=sys.stderr)
-                failures += 1
+                    continue
+                if status in ("failed", "verify-failed"):
+                    print(f"INVALID MANIFEST {path}: source recorded as {status}: "
+                          f"{row.get('source')}", file=sys.stderr)
+                    failures += 1
+                    continue
+                if status != "written":
+                    print(f"INVALID MANIFEST {path}: unknown status {status!r}",
+                          file=sys.stderr)
+                    failures += 1
+                    continue
+
+                output = row.get("output") or ""
+                digest = row.get("sha256") or ""
+                output_size = row.get("output_size") or ""
+                if (not output or len(digest) != 64 or
+                        any(ch not in "0123456789abcdefABCDEF" for ch in digest) or
+                        not output_size.isdecimal()):
+                    print(f"INVALID MANIFEST {path}: incomplete row for "
+                          f"{row.get('source')}", file=sys.stderr)
+                    failures += 1
+                    continue
+                if not os.path.isabs(output):
+                    output = os.path.join(base, output)
+                checked += 1
+                try:
+                    size = os.path.getsize(output)
+                    if size != int(output_size):
+                        print(f"MISMATCH {output}: size {size}", file=sys.stderr)
+                        failures += 1
+                        continue
+                    actual = sha256_file(output)
+                    if actual != digest:
+                        print(f"MISMATCH {output}: sha256", file=sys.stderr)
+                        failures += 1
+                except Exception as e:
+                    print(f"MISSING {output}: {e}", file=sys.stderr)
+                    failures += 1
+    except Exception as e:
+        print(f"INVALID MANIFEST {path}: {e}", file=sys.stderr)
+        return checked, failures + 1
+
+    if rows_seen == 0:
+        print(f"INVALID MANIFEST {path}: contains no rows", file=sys.stderr)
+        failures += 1
     return checked, failures
 
 
@@ -1067,14 +1262,23 @@ def dedupe_entries(entries, dry_run: bool = False) -> tuple[int, int, int]:
         try:
             size = os.path.getsize(fp)
             digest = sha256_file(fp)
+            metadata = _hardlink_metadata_signature(fp)
         except Exception as e:
             print(f"FAIL {fp}: {e}", file=sys.stderr)
             failures += 1
             continue
 
-        keeper = by_hash.get(digest)
+        if metadata is None:
+            print(f"SKIP {fp}: cannot inspect xattrs safely for hardlinking")
+            continue
+
+        keepers = by_hash.setdefault(digest, {})
+        keeper = keepers.get(metadata)
         if keeper is None:
-            by_hash[digest] = fp
+            if keepers:
+                print(f"SKIP {fp}: identical content but file metadata differs; "
+                      "hardlinking would merge that metadata")
+            keepers[metadata] = fp
             continue
 
         try:
@@ -1119,7 +1323,8 @@ def main():
     ap.add_argument("--suffix", default="", help="append suffix to basename before extension (e.g. _stripped)")
     ap.add_argument("--backup", action="store_true", help="keep a .bak of the original")
     ap.add_argument("--dry-run", action="store_true", help="report only, don't write")
-    ap.add_argument("--verify", action="store_true", help="verify pixel data is unchanged (requires Pillow)")
+    ap.add_argument("--verify", action="store_true",
+                    help="verify decoded pixels and preserved metadata (requires Pillow)")
     ap.add_argument("--keep-color", action="store_true",
                     help="keep color metadata (PNG color chunks, JPEG/WebP/GIF ICC)")
     ap.add_argument("--strip-orientation", action="store_true",
@@ -1141,7 +1346,7 @@ def main():
     ap.add_argument("--verify-manifest", metavar="FILE",
                     help="verify an existing manifest and exit")
     ap.add_argument("--dedupe", action="store_true",
-                    help="hardlink duplicate image files and exit")
+                    help="hardlink byte-identical images with matching metadata and exit")
     ap.add_argument("--passthrough", action="store_true",
                     help="copy non-image files into the output folder too (requires -o)")
     ap.add_argument("--skip-clean", action="store_true",
@@ -1158,6 +1363,8 @@ def main():
     if args.lossy_quality is not None:
         if not 1 <= args.lossy_quality <= 100:
             ap.error("--lossy-quality must be between 1 and 100")
+        if not have_pillow():
+            ap.error("--lossy-quality requires Pillow (pip install Pillow)")
         if args.verify:
             print("warning: --verify is ignored in lossy mode (pixels change).",
                   file=sys.stderr)
@@ -1184,6 +1391,9 @@ def main():
         if args.to_jxl or args.optimize or args.lossy_quality is not None \
                 or args.output_dir or args.manifest:
             ap.error("--dedupe cannot be combined with processing options")
+        print("Note: hardlinked paths share later content/metadata changes and "
+              "access time; creating links changes ctime. Files with differing "
+              "mode/owner/mtime/xattrs are skipped.", file=sys.stderr)
         entries = collect_file_entries(args.inputs, args.recursive)
         links, saved, failures = dedupe_entries(entries, args.dry_run)
         print(f"Dedupe: {links} hardlink(s), {saved} bytes saved, "
@@ -1204,6 +1414,36 @@ def main():
     if args.passthrough and output_dir:
         passthrough_entries = collect_passthrough_entries(
             args.inputs, args.recursive, prefix_roots, exclude_dir)
+
+    planned_image_outputs = []
+    output_pairs = []
+    for fp, base_dir in entries:
+        if args.to_jxl:
+            out_path = jxl_output_path(
+                fp, base_dir, output_dir, args.suffix, prefix_roots)
+        elif output_dir:
+            out_path = output_path_for(
+                fp, base_dir, output_dir, args.suffix, prefix_roots)
+        elif args.suffix:
+            name, ext = os.path.splitext(os.path.basename(fp))
+            out_path = os.path.join(os.path.dirname(fp), name + args.suffix + ext)
+        else:
+            out_path = fp
+        planned_image_outputs.append(out_path)
+        output_pairs.append((fp, out_path))
+
+    passthrough_output_pairs = [
+        (src, os.path.join(output_dir, rel))
+        for src, rel in passthrough_entries
+    ]
+    output_pairs.extend(passthrough_output_pairs)
+    source_paths = ([fp for fp, _ in entries] +
+                    [src for src, _ in passthrough_entries])
+    try:
+        validate_manifest_location(args.manifest, args.inputs)
+        validate_output_plan(output_pairs, source_paths, args.manifest)
+    except ValueError as e:
+        ap.error(str(e))
 
     total_saved = 0
     ok = 0
@@ -1230,7 +1470,7 @@ def main():
                 status,
             ])
 
-    for fp, base_dir in entries:
+    for (fp, base_dir), planned_out_path in zip(entries, planned_image_outputs):
         if args.to_jxl:
             try:
                 jxl, orig_size, note = to_jxl_file(
@@ -1249,8 +1489,7 @@ def main():
                 skipped += 1
                 continue
 
-            out_path = jxl_output_path(
-                fp, base_dir, output_dir, args.suffix, prefix_roots)
+            out_path = planned_out_path
             if os.path.exists(out_path):
                 if not args.quiet:
                     print(f"SKIP {fp}: {out_path} already exists")
@@ -1318,23 +1557,14 @@ def main():
             skipped += 1
             continue
 
-        if args.verify and not verify_lossless(fp, new_data):
+        if args.verify and not verify_lossless(
+                fp, new_data, args.keep_color, not args.strip_orientation):
             print(f"VERIFY FAILED {fp}: pixels differ or output is invalid!", file=sys.stderr)
             add_manifest(fp, "", orig_size, len(new_data), "", tool, "verify-failed")
             fail += 1
             continue
 
-        total_saved += saved
-
-        if output_dir:
-            out_path = output_path_for(
-                fp, base_dir, output_dir, args.suffix, prefix_roots)
-        elif args.suffix:
-            d = os.path.dirname(fp)
-            name, ext = os.path.splitext(os.path.basename(fp))
-            out_path = os.path.join(d, name + args.suffix + ext)
-        else:
-            out_path = fp
+        out_path = planned_out_path
 
         digest = hashlib.sha256(new_data).hexdigest()
         if args.dry_run:
@@ -1343,6 +1573,7 @@ def main():
                       f"(saved {saved}) [{tool}]")
             add_manifest(fp, out_path, orig_size, len(new_data), digest,
                          tool, "dry-run")
+            total_saved += saved
             ok += 1
             continue
 
@@ -1359,6 +1590,7 @@ def main():
 
         add_manifest(fp, out_path, orig_size, len(new_data), digest,
                      tool, "written")
+        total_saved += saved
         if not args.quiet:
             print(f"{fp}: {orig_size} -> {len(new_data)} bytes "
                   f"(saved {saved}) [{tool}] -> {out_path}")
@@ -1379,9 +1611,13 @@ def main():
                 fail += 1
 
     if args.manifest:
-        write_manifest(args.manifest, manifest_rows)
-        print(f"Manifest: wrote {len(manifest_rows)} row(s) to {args.manifest}",
-              file=sys.stderr)
+        try:
+            write_manifest(args.manifest, manifest_rows)
+            print(f"Manifest: wrote {len(manifest_rows)} row(s) to {args.manifest}",
+                  file=sys.stderr)
+        except Exception as e:
+            print(f"MANIFEST FAIL {args.manifest}: {e}", file=sys.stderr)
+            fail += 1
 
     print(f"\nDone: {ok} ok, {skipped} skipped, {fail} failed, "
           f"total saved {total_saved} bytes", file=sys.stderr)

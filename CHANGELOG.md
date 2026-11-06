@@ -3,6 +3,24 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.0.1] - 2026-11-06
+
+### Fixed
+- Prevented manifests and output files from colliding with each other or
+  overwriting a different selected input.
+- Lossless optimizers preserve EXIF orientation; verification now checks
+  preserved orientation and requested ICC/color metadata as well as pixels.
+- Lossy JPEG/WebP re-encoding retains ICC profiles when `--keep-color` is set.
+- Lossy mode now errors clearly when Pillow is missing, the input format is
+  unsupported, or an animated image cannot be re-encoded.
+- Manifest verification rejects malformed, empty, and failed/dry-run manifests
+  rather than reporting a false clean result.
+- Savings totals now include only successful writes (or planned dry runs).
+- Deduplication only hardlinks files with matching mode, ownership,
+  modification time, and extended attributes.
+- Added regression tests for orientation/color preservation, manifest safety,
+  output collisions, lossy-mode validation, and dedupe metadata handling.
+
 ## [2.0.0] - 2026-11-05
 
 ### Changed

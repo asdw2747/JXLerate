@@ -281,7 +281,7 @@ class App(tk.Tk):
 
         self.verify_var = tk.BooleanVar(value=bool(self._opt("verify", True)))
         self.verify_check = self._add_check(
-            opts, "Verify pixels unchanged", self.verify_var, 1, 0)
+            opts, "Verify pixels/metadata unchanged", self.verify_var, 1, 0)
 
         self.keep_color_var = tk.BooleanVar(value=bool(self._opt("keep_color", False)))
         self._add_check(opts, "Keep color info", self.keep_color_var, 1, 1)
@@ -649,6 +649,10 @@ class App(tk.Tk):
             messagebox.showwarning("Verify", "Pillow is not installed; disabling verification.")
             options["verify"] = False
         if options["lossy_quality"] is not None:
+            if not _si.have_pillow():
+                messagebox.showerror(
+                    "Lossy mode", "Pillow is required for lossy re-encoding.")
+                return
             options["verify"] = False
             if not messagebox.askyesno(
                     "Lossy mode",
@@ -722,6 +726,35 @@ class App(tk.Tk):
             passthrough_entries = _si.collect_passthrough_entries(
                 inputs, recursive, prefix_roots, exclude)
 
+        planned_outputs = []
+        output_pairs = []
+        for fp, base_dir in entries:
+            if to_jxl:
+                out_path = _si.jxl_output_path(
+                    fp, base_dir, outdir, suffix, prefix_roots)
+            elif outdir:
+                out_path = _si.output_path_for(
+                    fp, base_dir, outdir, suffix, prefix_roots)
+            elif suffix:
+                name, ext = os.path.splitext(os.path.basename(fp))
+                out_path = os.path.join(os.path.dirname(fp), name + suffix + ext)
+            else:
+                out_path = fp
+            planned_outputs.append(out_path)
+            output_pairs.append((fp, out_path))
+
+        passthrough_pairs = [
+            (src, os.path.join(outdir, rel)) for src, rel in passthrough_entries
+        ]
+        output_pairs.extend(passthrough_pairs)
+        source_paths = ([fp for fp, _ in entries] +
+                        [src for src, _ in passthrough_entries])
+        try:
+            _si.validate_output_plan(output_pairs, source_paths)
+        except ValueError as e:
+            self.log_queue.put(f"OUTPUT PLAN FAIL: {e}")
+            return (0, 0, 1, 0, False)
+
         total = len(entries)
         self.log_queue.put(f"Processing {total} image file(s)...")
         self.log_queue.put(("progress", 0, total, ""))
@@ -731,7 +764,8 @@ class App(tk.Tk):
         fail = 0
         cancelled = False
 
-        for index, (fp, base_dir) in enumerate(entries, 1):
+        for index, ((fp, base_dir), planned_out_path) in enumerate(
+                zip(entries, planned_outputs), 1):
             if self.cancel_event.is_set():
                 cancelled = True
                 break
@@ -751,8 +785,7 @@ class App(tk.Tk):
                     skipped += 1
                     continue
 
-                out_path = _si.jxl_output_path(
-                    fp, base_dir, outdir, suffix, prefix_roots)
+                out_path = planned_out_path
                 if os.path.exists(out_path):
                     self.log_queue.put(f"SKIP {fp}: {out_path} already exists")
                     skipped += 1
@@ -803,27 +836,19 @@ class App(tk.Tk):
                 skipped += 1
                 continue
 
-            if verify and not _si.verify_lossless(fp, new_data):
+            if verify and not _si.verify_lossless(
+                    fp, new_data, keep_color, keep_orientation):
                 self.log_queue.put(f"VERIFY FAILED {fp}: pixels differ or output invalid!")
                 fail += 1
                 continue
 
-            total_saved += saved
-
-            if outdir:
-                out_path = _si.output_path_for(
-                    fp, base_dir, outdir, suffix, prefix_roots)
-            elif suffix:
-                d = os.path.dirname(fp)
-                name, ext = os.path.splitext(os.path.basename(fp))
-                out_path = os.path.join(d, name + suffix + ext)
-            else:
-                out_path = fp
+            out_path = planned_out_path
 
             if dry:
                 self.log_queue.put(
                     f"{fp}: {orig_size} -> {len(new_data)} bytes "
                     f"(saved {saved}) [{tool}]")
+                total_saved += saved
                 ok += 1
                 continue
 
@@ -831,6 +856,7 @@ class App(tk.Tk):
                 if backup and out_path == fp:
                     shutil.copy2(fp, fp + ".bak")
                 _si.write_file_atomic(out_path, new_data, keep_stat_from=fp)
+                total_saved += saved
                 self.log_queue.put(
                     f"{fp}: {orig_size} -> {len(new_data)} bytes "
                     f"(saved {saved}) [{tool}] -> {out_path}")
