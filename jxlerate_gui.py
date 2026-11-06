@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Prisma Chill
-"""GUI front-end for strip_images: losslessly strip metadata from image files."""
+"""JXLerate GUI: lossless image archiver and optimizer."""
 import json
 import os
 import queue
@@ -14,19 +14,21 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# Reuse the core logic from strip_images.py
+# Reuse the core logic from jxlerate.py
 import importlib.util
 _SPEC = importlib.util.spec_from_file_location(
-    "strip_images", os.path.join(os.path.dirname(os.path.abspath(__file__)), "strip_images.py"))
+    "jxlerate", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jxlerate.py"))
 _si = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_si)
 
-APP_TITLE = "Strip Image Metadata"
+APP_TITLE = "JXLerate"
 APP_VERSION = getattr(_si, "__version__", "unknown")
 DONE = "__done__"
 
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "strip-images")
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "jxlerate")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+OLD_CONFIG_PATH = os.path.join(
+    os.path.expanduser("~"), ".config", "strip-images", "config.json")
 
 _GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
@@ -66,7 +68,18 @@ THEMES = {
 }
 
 
+def migrate_config():
+    """Carry settings over from the old strip-images config location."""
+    if os.path.exists(OLD_CONFIG_PATH) and not os.path.exists(CONFIG_PATH):
+        try:
+            os.makedirs(CONFIG_DIR, exist_ok=True)
+            shutil.copy2(OLD_CONFIG_PATH, CONFIG_PATH)
+        except Exception:
+            pass
+
+
 def load_config():
+    migrate_config()
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             data = json.load(f)

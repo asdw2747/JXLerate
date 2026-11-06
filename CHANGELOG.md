@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] - 2026-11-05
+
+### Changed
+- Renamed the project from `strip-images` to **JXLerate** to reflect its broader
+  scope (metadata stripping, lossless optimization, JPEG XL archiving,
+  deduplication, and integrity manifests).
+- CLI command is now `jxlerate`; GUI command is `jxlerate-gui`.
+- Configuration moved to `~/.config/jxlerate/config.json` and is migrated
+  automatically from the old location.
+- The old `strip-images` / `strip-images-gui` commands and desktop entry were
+  removed.
+
 ## [1.6.0] - 2026-11-05
 
 ### Added

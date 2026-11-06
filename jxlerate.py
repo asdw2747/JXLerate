@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Prisma Chill
-"""strip_images - losslessly strip metadata from PNG, JPEG, WebP and GIF files.
+"""JXLerate - lossless image archiver and optimizer.
 
-Removes all non-essential chunks/markers (EXIF, text, gamma, color profiles,
-comments, APP segments, etc.) while preserving the exact pixel data.
+Strips non-essential metadata from PNG, JPEG, WebP and GIF files, can
+losslessly recompress them, transcode to JPEG XL, deduplicate, and write
+integrity manifests -- always preserving the exact pixel data.
 
 Usage:
-    python3 strip_images.py file.png file.jpg file.webp file.gif ...
-    python3 strip_images.py -r ./photos
-    python3 strip_images.py -r ./photos -o ./stripped
-    python3 strip_images.py -r ./photos -o ./stripped --passthrough
-    python3 strip_images.py --verify file.png
-    python3 strip_images.py --skip-clean -r ./photos
+    jxlerate file.png file.jpg file.webp file.gif ...
+    jxlerate -r ./photos
+    jxlerate -r ./photos -o ./archive
+    jxlerate --optimize -r ./photos
+    jxlerate --to-jxl -r ./photos -o ./archive
+    jxlerate --verify file.png
+    jxlerate --skip-clean -r ./photos
 """
 from __future__ import annotations
 
@@ -29,7 +31,7 @@ import sys
 import tempfile
 import zlib
 
-__version__ = "1.6.0"
+__version__ = "2.0.0"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
@@ -1108,7 +1110,7 @@ def dedupe_entries(entries, dry_run: bool = False) -> tuple[int, int, int]:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Losslessly strip metadata from PNG/JPEG/WebP/GIF files.")
+        description="JXLerate - lossless image archiver and optimizer.")
     ap.add_argument("--version", action="version",
                     version=f"%(prog)s {__version__}")
     ap.add_argument("inputs", nargs="*", help="files or directories")

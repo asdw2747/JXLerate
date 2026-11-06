@@ -1,9 +1,14 @@
-# strip-images
+# JXLerate
 
-**Version 1.6.0**
+**Version 2.0.0**
 
-Losslessly strip unnecessary metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and
-`.gif` files while keeping the actual image pixel data bit-for-bit identical.
+JXLerate is a lossless image archiver and optimizer. It removes unnecessary
+metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly
+recompress them, transcode to JPEG XL, deduplicate identical files, and write
+integrity manifests — always keeping the actual image pixel data bit-for-bit
+identical.
+
+> Renamed from `strip-images` in v2.0.0. The old command names were removed.
 
 ## What gets removed
 
@@ -103,11 +108,13 @@ Optimization uses `oxipng`/`optipng`, `jpegtran`, and Pillow; JXL uses
 ## Install / use
 
 ```sh
-strip-images photo.png photo.jpg photo.webp animation.gif
-strip-images -r ./photos
-strip-images -r ./photos -o ./stripped
-strip-images --verify --backup file.png
-strip-images --skip-clean -r ./photos
+jxlerate photo.png photo.jpg photo.webp animation.gif
+jxlerate -r ./photos
+jxlerate -r ./photos -o ./archive
+jxlerate --optimize -r ./photos
+jxlerate --to-jxl -r ./photos -o ./archive
+jxlerate --verify --backup file.png
+jxlerate --skip-clean -r ./photos
 ```
 
 Options:
@@ -146,7 +153,7 @@ overwrite each other.
 A Tkinter GUI is included:
 
 ```sh
-strip-images-gui
+jxlerate-gui
 ```
 
 Features:
@@ -170,11 +177,18 @@ Features:
 The **Theme: Auto / Light / Dark** selector follows the desktop preference via
 GNOME `color-scheme`, then GTK `~/.config/gtk-3.0/settings.ini`, then the
 `GTK_THEME` environment variable. Settings are saved in
-`~/.config/strip-images/config.json`.
+`~/.config/jxlerate/config.json` (migrated automatically from the old
+`strip-images` config on first launch).
 
 ## Requirements
 
-Python 3.8+. Pillow optional (only for `--verify`). No other dependencies.
+Python 3.8+. The core stripping tool has no third-party dependencies.
+
+Optional, used only for the matching features:
+- **Pillow** — `--verify`, lossy mode, WebP optimization
+- **oxipng** / **optipng** — PNG optimization
+- **jpegtran** — JPEG optimization
+- **cjxl** / **djxl** — JPEG XL conversion
 
 ## License
 
