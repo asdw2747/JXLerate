@@ -3,6 +3,26 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-11-05
+
+### Added
+- Lossless **WebP** support: strips `EXIF`, `XMP `, and (optionally) `ICCP`
+  chunks and updates the VP8X presence flags.
+- Lossless **GIF** support: strips comment extensions and metadata-only
+  application extensions (XMP, optionally ICC) while keeping animation and
+  graphic-control data.
+- `--skip-clean` to leave files that already have no metadata untouched.
+- `--only-if-smaller` to write only when stripping actually reduces size.
+- GUI checkboxes for **Skip unchanged files** and **Only write if smaller**.
+- Multi-frame verification: `--verify` now checks every frame of animated
+  PNG/WebP/GIF files, not just the first.
+
+### Fixed
+- Atomic writes no longer reset file permissions to `0600`; the original mode
+  and timestamps are preserved.
+- In-place processing of a symlink now updates the link target instead of
+  replacing the symlink with a regular file.
+
 ## [1.1.0] - 2026-11-05
 
 ### Added

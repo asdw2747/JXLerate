@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUI front-end for strip_images: losslessly strip metadata from PNG/JPEG files."""
+"""GUI front-end for strip_images: losslessly strip metadata from image files."""
 import json
 import os
 import queue
@@ -211,9 +211,15 @@ class App(tk.Tk):
         self.passthrough_var = tk.BooleanVar(value=False)
         self._add_check(opts, "Passthrough other files", self.passthrough_var, 2, 1)
 
+        self.skip_clean_var = tk.BooleanVar(value=False)
+        self._add_check(opts, "Skip unchanged files", self.skip_clean_var, 3, 0)
+
+        self.only_smaller_var = tk.BooleanVar(value=False)
+        self._add_check(opts, "Only write if smaller", self.only_smaller_var, 3, 1)
+
         # --- theme selector ---
         theme_row = ttk.Frame(opts)
-        theme_row.grid(row=3, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+        theme_row.grid(row=4, column=0, columnspan=3, sticky="w", padx=4, pady=2)
         ttk.Label(theme_row, text="Theme:").pack(side="left", padx=(0, 6))
         for value, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
             radio = tk.Radiobutton(
@@ -223,18 +229,18 @@ class App(tk.Tk):
             radio.pack(side="left", padx=4)
             self._radio_widgets.append(radio)
 
-        ttk.Label(opts, text="Suffix:").grid(row=4, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(opts, text="Suffix:").grid(row=5, column=0, sticky="w", padx=4, pady=2)
         self.suffix_var = tk.StringVar(value="")
         ttk.Entry(opts, textvariable=self.suffix_var, width=16).grid(
-            row=4, column=1, sticky="w", padx=4, pady=2)
+            row=5, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Label(opts, text="Output folder (blank = in place):").grid(
-            row=5, column=0, sticky="w", padx=4, pady=2)
+            row=6, column=0, sticky="w", padx=4, pady=2)
         self.outdir_var = tk.StringVar(value="")
         ttk.Entry(opts, textvariable=self.outdir_var, width=40).grid(
-            row=5, column=1, sticky="we", padx=4, pady=2)
+            row=6, column=1, sticky="we", padx=4, pady=2)
         ttk.Button(opts, text="Browse", command=self.browse_outdir).grid(
-            row=5, column=2, padx=4, pady=2)
+            row=6, column=2, padx=4, pady=2)
         opts.columnconfigure(1, weight=1)
 
         # --- run ---
@@ -369,7 +375,10 @@ class App(tk.Tk):
     def add_files(self):
         paths = filedialog.askopenfilenames(
             title="Select images",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.PNG *.JPG *.JPEG"), ("All files", "*.*")])
+            filetypes=[
+                ("Images", "*.png *.jpg *.jpeg *.webp *.gif *.PNG *.JPG *.JPEG *.WEBP *.GIF"),
+                ("All files", "*.*"),
+            ])
         for p in paths:
             if p not in self.files:
                 self.files.append(p)
@@ -416,6 +425,8 @@ class App(tk.Tk):
             "keep_color": self.keep_color_var.get(),
             "dry": self.dryrun_var.get(),
             "passthrough": self.passthrough_var.get(),
+            "skip_clean": self.skip_clean_var.get(),
+            "only_smaller": self.only_smaller_var.get(),
         }
         if options["passthrough"] and not options["outdir"]:
             messagebox.showwarning("Passthrough", "Passthrough requires an Output folder.")
@@ -448,6 +459,8 @@ class App(tk.Tk):
         keep_color = options["keep_color"]
         dry = options["dry"]
         passthrough = options["passthrough"]
+        skip_clean = options["skip_clean"]
+        only_smaller = options["only_smaller"]
 
         exclude = outdir
         dir_inputs = [p for p in inputs if os.path.isdir(p)]
@@ -466,14 +479,27 @@ class App(tk.Tk):
         self.log_queue.put(f"Processing {len(entries)} image file(s)...")
         total_saved = 0
         ok = 0
+        skipped = 0
         fail = 0
 
         for fp, base_dir in entries:
             try:
-                new_data, orig_size = _si.strip_file(fp, keep_color)
+                new_data, orig_size, changed = _si.strip_file(fp, keep_color)
             except Exception as e:
                 self.log_queue.put(f"FAIL {fp}: {e}")
                 fail += 1
+                continue
+
+            saved = orig_size - len(new_data)
+
+            skip_reason = None
+            if only_smaller and (not changed or len(new_data) >= orig_size):
+                skip_reason = "no smaller result"
+            elif skip_clean and not changed:
+                skip_reason = "already clean"
+            if skip_reason:
+                self.log_queue.put(f"SKIP {fp}: {skip_reason}")
+                skipped += 1
                 continue
 
             if verify and not _si.verify_lossless(fp, new_data):
@@ -481,7 +507,6 @@ class App(tk.Tk):
                 fail += 1
                 continue
 
-            saved = orig_size - len(new_data)
             total_saved += saved
 
             if outdir:
@@ -503,7 +528,7 @@ class App(tk.Tk):
                 if backup and out_path == fp:
                     import shutil
                     shutil.copy2(fp, fp + ".bak")
-                _si.write_file_atomic(out_path, new_data)
+                _si.write_file_atomic(out_path, new_data, keep_stat_from=fp)
                 self.log_queue.put(
                     f"{fp}: {orig_size} -> {len(new_data)} bytes (saved {saved}) -> {out_path}")
                 ok += 1
@@ -524,8 +549,9 @@ class App(tk.Tk):
                     fail += 1
 
         self.log_queue.put(
-            f"\nDone: {ok} ok, {fail} failed, total saved {total_saved} bytes")
-        return (ok, fail, total_saved)
+            f"\nDone: {ok} ok, {skipped} skipped, {fail} failed, "
+            f"total saved {total_saved} bytes")
+        return (ok, skipped, fail, total_saved)
 
     def _finish(self, summary):
         self.progress.stop()
@@ -533,9 +559,11 @@ class App(tk.Tk):
         if summary == "none":
             messagebox.showwarning("No files", "No image files found in the selected inputs.")
         elif isinstance(summary, tuple):
-            ok, fail, saved = summary
+            ok, skipped, fail, saved = summary
             messagebox.showinfo(
-                "Finished", f"Done: {ok} ok, {fail} failed.\nTotal saved: {saved} bytes.")
+                "Finished",
+                f"Done: {ok} ok, {skipped} skipped, {fail} failed.\n"
+                f"Total saved: {saved} bytes.")
 
 
 def main():

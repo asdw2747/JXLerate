@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
-"""strip_images - losslessly strip metadata from PNG and JPEG files.
+"""strip_images - losslessly strip metadata from PNG, JPEG, WebP and GIF files.
 
 Removes all non-essential chunks/markers (EXIF, text, gamma, color profiles,
 comments, APP segments, etc.) while preserving the exact pixel data.
 
 Usage:
-    python3 strip_images.py file.png file.jpg ...
+    python3 strip_images.py file.png file.jpg file.webp file.gif ...
     python3 strip_images.py -r ./photos
     python3 strip_images.py -r ./photos -o ./stripped
     python3 strip_images.py -r ./photos -o ./stripped --passthrough
     python3 strip_images.py --verify file.png
+    python3 strip_images.py --skip-clean -r ./photos
 """
+from __future__ import annotations
+
 import argparse
 import io
 import os
 import shutil
+import stat
 import struct
 import sys
 import tempfile
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
@@ -45,7 +49,14 @@ JPEG_KEEP_APP = {0xEE}
 # APP2 often carries an ICC profile; kept only with --keep-color.
 JPEG_KEEP_APP_COLOR = {0xE2}
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
+# WebP chunks required for decoding.
+WEBP_KEEP_CHUNKS = {b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ANIM", b"ANMF"}
+
+# GIF application extensions that affect playback/rendering.
+GIF_KEEP_APPS = {b"NETSCAPE2.0", b"ANIMEXTS1.0"}
+GIF_APP_ICC = b"ICCRGBG1012"
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +194,157 @@ def strip_jpeg(data: bytes, keep_color: bool = False) -> bytes:
     return bytes(out)
 
 
-def strip_file(path: str, keep_color: bool = False) -> tuple[bytes, int]:
+def strip_webp(data: bytes, keep_color: bool = False) -> bytes:
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        raise ValueError("not a WebP file")
+
+    pos = 12
+    n = len(data)
+    chunks = []
+    has_image = False
+
+    while pos < n:
+        if pos + 8 > n:
+            raise ValueError("truncated WebP (incomplete chunk header)")
+        fourcc = data[pos:pos + 4]
+        size = struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        payload_start = pos + 8
+        payload_end = payload_start + size
+        if payload_end > n:
+            raise ValueError("truncated WebP (incomplete chunk data)")
+        padded_end = payload_end + (size & 1)
+        if padded_end > n:
+            padded_end = payload_end  # tolerate a missing final pad byte
+
+        payload = data[payload_start:payload_end]
+        pad = data[payload_end:padded_end]
+        pos = padded_end
+
+        if fourcc in (b"VP8 ", b"VP8L", b"ANMF"):
+            has_image = True
+
+        keep = fourcc in WEBP_KEEP_CHUNKS
+        if keep_color and fourcc == b"ICCP":
+            keep = True
+
+        if keep:
+            if fourcc == b"VP8X":
+                if not payload:
+                    raise ValueError("invalid WebP (empty VP8X chunk)")
+                # Clear ICC/EXIF/XMP presence flags for chunks we remove.
+                flags = payload[0]
+                if not keep_color:
+                    flags &= ~0x20  # ICC profile
+                flags &= ~0x08  # EXIF
+                flags &= ~0x04  # XMP
+                payload = bytes([flags]) + payload[1:]
+            chunks.append(fourcc + struct.pack("<I", len(payload)) + payload + pad)
+
+    if not has_image:
+        raise ValueError("invalid WebP (no image data)")
+
+    body = b"WEBP" + b"".join(chunks)
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def _gif_subblocks_end(data: bytes, pos: int) -> int:
+    """Return the position just past a GIF sub-block chain."""
+    while True:
+        if pos >= len(data):
+            raise ValueError("truncated GIF (incomplete sub-blocks)")
+        size = data[pos]
+        pos += 1
+        if size == 0:
+            return pos
+        if pos + size > len(data):
+            raise ValueError("truncated GIF (incomplete sub-block)")
+        pos += size
+
+
+def strip_gif(data: bytes, keep_color: bool = False) -> bytes:
+    if data[:6] not in (b"GIF87a", b"GIF89a"):
+        raise ValueError("not a GIF file")
+    if len(data) < 13:
+        raise ValueError("truncated GIF header")
+
+    out = bytearray(data[:13])  # header + logical screen descriptor
+    packed = data[10]
+    pos = 13
+    if packed & 0x80:  # global color table
+        gct_size = 3 * (2 ** ((packed & 0x07) + 1))
+        if pos + gct_size > len(data):
+            raise ValueError("truncated GIF (incomplete global color table)")
+        out += data[pos:pos + gct_size]
+        pos += gct_size
+
+    found_trailer = False
+    while pos < len(data):
+        introducer = data[pos]
+
+        if introducer == 0x3B:  # trailer
+            out.append(0x3B)
+            found_trailer = True
+            break
+
+        if introducer == 0x21:  # extension
+            if pos + 2 > len(data):
+                raise ValueError("truncated GIF extension")
+            label = data[pos + 1]
+
+            if label == 0xFE:  # comment -> strip
+                pos = _gif_subblocks_end(data, pos + 2)
+                continue
+
+            if label == 0xFF:  # application extension
+                if pos + 3 > len(data):
+                    raise ValueError("truncated GIF application extension")
+                block_size = data[pos + 2]
+                app_end = pos + 3 + block_size
+                if app_end > len(data):
+                    raise ValueError("truncated GIF application extension")
+                app_id = data[pos + 3:app_end]
+                end = _gif_subblocks_end(data, app_end)
+                keep = app_id in GIF_KEEP_APPS
+                if keep_color and app_id == GIF_APP_ICC:
+                    keep = True
+                if keep:
+                    out += data[pos:end]
+                pos = end
+                continue
+
+            # Graphic control, plain text, and unknown extensions are kept.
+            end = _gif_subblocks_end(data, pos + 2)
+            out += data[pos:end]
+            pos = end
+            continue
+
+        if introducer == 0x2C:  # image descriptor
+            if pos + 10 > len(data):
+                raise ValueError("truncated GIF image descriptor")
+            packed_img = data[pos + 9]
+            q = pos + 10
+            if packed_img & 0x80:  # local color table
+                lct_size = 3 * (2 ** ((packed_img & 0x07) + 1))
+                if q + lct_size > len(data):
+                    raise ValueError("truncated GIF (incomplete local color table)")
+                q += lct_size
+            if q >= len(data):
+                raise ValueError("truncated GIF image data")
+            q += 1  # LZW minimum code size
+            end = _gif_subblocks_end(data, q)
+            out += data[pos:end]
+            pos = end
+            continue
+
+        raise ValueError("invalid GIF block")
+
+    if not found_trailer:
+        raise ValueError("invalid/truncated GIF (missing trailer)")
+    return bytes(out)
+
+
+def strip_file(path: str, keep_color: bool = False) -> tuple[bytes, int, bool]:
+    """Return (stripped_bytes, original_size, changed)."""
     with open(path, "rb") as f:
         data = f.read()
     low = path.lower()
@@ -191,9 +352,13 @@ def strip_file(path: str, keep_color: bool = False) -> tuple[bytes, int]:
         new = strip_png(data, keep_color)
     elif low.endswith(".jpg") or low.endswith(".jpeg"):
         new = strip_jpeg(data, keep_color)
+    elif low.endswith(".webp"):
+        new = strip_webp(data, keep_color)
+    elif low.endswith(".gif"):
+        new = strip_gif(data, keep_color)
     else:
         raise ValueError(f"unsupported file type: {path}")
-    return new, len(data)
+    return new, len(data), (new != data)
 
 
 # ---------------------------------------------------------------------------
@@ -208,11 +373,27 @@ def have_pillow() -> bool:
         return False
 
 
+def _frame_signatures(image) -> list:
+    """Hash every frame so animated PNG/GIF/WebP files are fully verified."""
+    import hashlib
+    from PIL import ImageSequence
+
+    signatures = []
+    for frame in ImageSequence.Iterator(image):
+        signatures.append((
+            frame.mode,
+            frame.size,
+            hashlib.sha256(frame.tobytes()).hexdigest(),
+        ))
+    return signatures
+
+
 def verify_lossless(orig_path: str, new_data: bytes) -> bool:
     """Return True only if the stripped bytes decode to identical pixels.
 
-    Returns False (never silently True) on decode errors or mismatches.
-    Raises RuntimeError if Pillow is unavailable.
+    Verifies every frame of animated files. Returns False (never silently
+    True) on decode errors or mismatches. Raises RuntimeError if Pillow is
+    unavailable.
     """
     try:
         from PIL import Image
@@ -222,24 +403,41 @@ def verify_lossless(orig_path: str, new_data: bytes) -> bool:
     try:
         with Image.open(orig_path) as im:
             im.load()
-            orig = (im.mode, im.size, im.tobytes())
+            orig = _frame_signatures(im)
         with Image.open(io.BytesIO(new_data)) as im2:
             im2.load()
-            new = (im2.mode, im2.size, im2.tobytes())
+            new = _frame_signatures(im2)
     except Exception:
         return False
     return orig == new
 
 
-def write_file_atomic(path: str, data: bytes) -> None:
-    """Write data to path atomically (temp file + os.replace)."""
-    directory = os.path.dirname(os.path.abspath(path)) or "."
+def write_file_atomic(path: str, data: bytes, keep_stat_from: str | None = None) -> None:
+    """Write data atomically, preserving mode/mtime and following symlinks.
+
+    keep_stat_from is the original file whose permissions and timestamps
+    should be carried over to the replacement.
+    """
+    # If path is a symlink, update its target instead of replacing the link.
+    target = os.path.realpath(path) if os.path.islink(path) else path
+    directory = os.path.dirname(os.path.abspath(target)) or "."
     os.makedirs(directory, exist_ok=True)
+
+    source_stat = None
+    if keep_stat_from:
+        try:
+            source_stat = os.stat(keep_stat_from)  # follows symlinks
+        except OSError:
+            source_stat = None
+
     fd, tmp = tempfile.mkstemp(prefix=".strip-", dir=directory)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.replace(tmp, path)
+        if source_stat is not None:
+            os.chmod(tmp, stat.S_IMODE(source_stat.st_mode))
+            os.utime(tmp, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        os.replace(tmp, target)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -352,7 +550,7 @@ def copy_passthrough(entries, output_dir):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Losslessly strip metadata from PNG/JPEG files.")
+        description="Losslessly strip metadata from PNG/JPEG/WebP/GIF files.")
     ap.add_argument("--version", action="version",
                     version=f"%(prog)s {__version__}")
     ap.add_argument("inputs", nargs="+", help="files or directories")
@@ -363,9 +561,13 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="report only, don't write")
     ap.add_argument("--verify", action="store_true", help="verify pixel data is unchanged (requires Pillow)")
     ap.add_argument("--keep-color", action="store_true",
-                    help="keep color/rendering metadata (iCCP/sRGB/gAMA/cHRM, JPEG ICC)")
+                    help="keep color metadata (PNG color chunks, JPEG/WebP/GIF ICC)")
     ap.add_argument("--passthrough", action="store_true",
                     help="copy non-image files into the output folder too (requires -o)")
+    ap.add_argument("--skip-clean", action="store_true",
+                    help="do not write files that have nothing to strip")
+    ap.add_argument("--only-if-smaller", action="store_true",
+                    help="only write when the result is smaller (implies --skip-clean)")
     ap.add_argument("-q", "--quiet", action="store_true", help="suppress per-file output")
     args = ap.parse_args()
 
@@ -391,14 +593,28 @@ def main():
 
     total_saved = 0
     ok = 0
+    skipped = 0
     fail = 0
 
     for fp, base_dir in entries:
         try:
-            new_data, orig_size = strip_file(fp, args.keep_color)
+            new_data, orig_size, changed = strip_file(fp, args.keep_color)
         except Exception as e:
             print(f"FAIL {fp}: {e}", file=sys.stderr)
             fail += 1
+            continue
+
+        saved = orig_size - len(new_data)
+
+        skip_reason = None
+        if args.only_if_smaller and (not changed or len(new_data) >= orig_size):
+            skip_reason = "no smaller result"
+        elif args.skip_clean and not changed:
+            skip_reason = "already clean"
+        if skip_reason:
+            if not args.quiet:
+                print(f"SKIP {fp}: {skip_reason}")
+            skipped += 1
             continue
 
         if args.verify and not verify_lossless(fp, new_data):
@@ -406,7 +622,6 @@ def main():
             fail += 1
             continue
 
-        saved = orig_size - len(new_data)
         total_saved += saved
 
         if output_dir:
@@ -428,7 +643,7 @@ def main():
         try:
             if args.backup and out_path == fp:
                 shutil.copy2(fp, fp + ".bak")
-            write_file_atomic(out_path, new_data)
+            write_file_atomic(out_path, new_data, keep_stat_from=fp)
         except Exception as e:
             print(f"WRITE FAIL {fp}: {e}", file=sys.stderr)
             fail += 1
@@ -452,8 +667,8 @@ def main():
                 print(f"PASSTHROUGH FAIL: {e}", file=sys.stderr)
                 fail += 1
 
-    print(f"\nDone: {ok} ok, {fail} failed, total saved {total_saved} bytes",
-          file=sys.stderr)
+    print(f"\nDone: {ok} ok, {skipped} skipped, {fail} failed, "
+          f"total saved {total_saved} bytes", file=sys.stderr)
     if fail:
         sys.exit(1)
 
