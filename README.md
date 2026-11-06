@@ -1,6 +1,6 @@
 # strip-images
 
-**Version 1.4.0**
+**Version 1.5.0**
 
 Losslessly strip unnecessary metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and
 `.gif` files while keeping the actual image pixel data bit-for-bit identical.
@@ -55,6 +55,22 @@ pixel-lossless recompression:
 - `--progressive` — write progressive JPEGs when optimizing (~10% on photos,
   compared with ~7% for baseline optimization).
 
+### JPEG XL archival transcode (`--to-jxl`)
+
+For much larger savings, `--to-jxl` converts to JPEG XL (requires `cjxl`/`djxl`):
+
+- **JPEG → JXL**: lossless JPEG recompression; the original JPEG can be
+  reconstructed **bit-for-bit** (`djxl`). Typical savings: **~20–25%**.
+- **PNG/WebP/GIF → JXL**: mathematically lossless pixel transcode. Typical
+  savings: **~35–45%** on PNG, ~10–15% on existing lossless WebP.
+- Every conversion is verified before it is accepted (bit-exact for JPEG,
+  decoded pixels for the others), and only kept when smaller.
+- Originals are kept by default. Add `--replace` to delete them after a
+  verified conversion (in-place mode only).
+- Animated inputs are skipped for now.
+- JXL viewer support is still limited, but it is an ISO standard
+  (ISO/IEC 18181) designed for archival use.
+
 **Lossy mode (off by default, changes pixels):**
 
 - `--lossy-quality N` re-encodes JPEG (and static WebP) at quality 1–100.
@@ -86,6 +102,8 @@ Options:
 - `--max-effort` slower, better PNG optimization (zopfli)
 - `--progressive` write progressive JPEGs when optimizing
 - `--lossy-quality N` LOSSY JPEG/WebP re-encode (off by default; changes pixels)
+- `--to-jxl` losslessly transcode to JPEG XL (requires `cjxl`/`djxl`)
+- `--replace` with `--to-jxl`, delete originals after verified conversion
 - `--skip-clean` do not write files that already have no metadata to strip
 - `--only-if-smaller` only write when the result is smaller (implies skip-clean)
 - `--suffix S` append suffix to filenames
@@ -116,6 +134,8 @@ Features:
   skip-clean, and only-if-smaller.
 - Lossless **Optimize** (with **Max effort** and **Progressive JPEG**), plus an
   off-by-default **Lossy re-encode** with a quality spinbox and confirmation.
+- **Convert to JPEG XL** with an optional **Replace originals with .jxl**
+  checkbox. Lossy and same-format optimize are disabled while JXL is selected.
 - Determinate progress with the current filename and a **Cancel** button.
 - **Open** button to launch the output folder.
 - Confirmation before overwriting originals in place.

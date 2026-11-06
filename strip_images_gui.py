@@ -141,8 +141,8 @@ class App(tk.Tk):
         self.title(f"{APP_TITLE} v{APP_VERSION}")
         geometry = self.config_data.get("geometry")
         self.geometry(geometry if isinstance(geometry, str) and _GEOMETRY_RE.match(geometry)
-                      else "800x870")
-        self.minsize(680, 720)
+                      else "800x930")
+        self.minsize(680, 760)
         self.configure(bg=THEMES[self.resolved_theme]["window"])
 
         self.files = []
@@ -199,6 +199,8 @@ class App(tk.Tk):
             "progressive": self.progressive_var.get(),
             "lossy": self.lossy_var.get(),
             "lossy_quality": self.lossy_quality_var.get(),
+            "to_jxl": self.to_jxl_var.get(),
+            "replace": self.replace_var.get(),
             "dryrun": self.dryrun_var.get(),
             "passthrough": self.passthrough_var.get(),
             "skip_clean": self.skip_clean_var.get(),
@@ -288,13 +290,15 @@ class App(tk.Tk):
         self._add_check(opts, "Preserve orientation", self.keep_orientation_var, 4, 0)
 
         self.optimize_var = tk.BooleanVar(value=bool(self._opt("optimize", False)))
-        self._add_check(opts, "Optimize losslessly", self.optimize_var, 5, 0)
+        self.optimize_check = self._add_check(
+            opts, "Optimize losslessly", self.optimize_var, 5, 0)
 
         self.max_effort_var = tk.BooleanVar(value=bool(self._opt("max_effort", False)))
         self._add_check(opts, "Max effort (slow)", self.max_effort_var, 5, 1)
 
         self.progressive_var = tk.BooleanVar(value=bool(self._opt("progressive", False)))
-        self._add_check(opts, "Progressive JPEG", self.progressive_var, 6, 0)
+        self.progressive_check = self._add_check(
+            opts, "Progressive JPEG", self.progressive_var, 6, 0)
 
         self.lossy_var = tk.BooleanVar(value=bool(self._opt("lossy", False)))
         lossy_frame = ttk.Frame(opts)
@@ -313,8 +317,17 @@ class App(tk.Tk):
             textvariable=self.lossy_quality_var)
         self.quality_spin.pack(side="left")
 
+        self.to_jxl_var = tk.BooleanVar(value=bool(self._opt("to_jxl", False)))
+        self.jxl_check = self._add_check(
+            opts, "Convert to JPEG XL", self.to_jxl_var, 7, 0)
+        self.jxl_check.configure(command=self._on_jxl_toggle)
+
+        self.replace_var = tk.BooleanVar(value=bool(self._opt("replace", False)))
+        self.replace_check = self._add_check(
+            opts, "Replace originals with .jxl", self.replace_var, 7, 1)
+
         theme_row = ttk.Frame(opts)
-        theme_row.grid(row=7, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+        theme_row.grid(row=8, column=0, columnspan=3, sticky="w", padx=4, pady=2)
         ttk.Label(theme_row, text="Theme:").pack(side="left", padx=(0, 6))
         for value, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
             radio = tk.Radiobutton(
@@ -324,23 +337,24 @@ class App(tk.Tk):
             radio.pack(side="left", padx=4)
             self._radio_widgets.append(radio)
 
-        ttk.Label(opts, text="Suffix:").grid(row=8, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(opts, text="Suffix:").grid(row=9, column=0, sticky="w", padx=4, pady=2)
         self.suffix_var = tk.StringVar(value=str(self._opt("suffix", "")))
         ttk.Entry(opts, textvariable=self.suffix_var, width=16).grid(
-            row=8, column=1, sticky="w", padx=4, pady=2)
+            row=9, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Label(opts, text="Output folder (blank = in place):").grid(
-            row=9, column=0, sticky="w", padx=4, pady=2)
+            row=10, column=0, sticky="w", padx=4, pady=2)
         self.outdir_var = tk.StringVar(value=str(self._opt("outdir", "")))
         ttk.Entry(opts, textvariable=self.outdir_var, width=40).grid(
-            row=9, column=1, sticky="we", padx=4, pady=2)
+            row=10, column=1, sticky="we", padx=4, pady=2)
         ttk.Button(opts, text="Browse", command=self.browse_outdir).grid(
-            row=9, column=2, padx=4, pady=2)
+            row=10, column=2, padx=4, pady=2)
         ttk.Button(opts, text="Open", command=self.open_output).grid(
-            row=9, column=3, padx=(0, 4), pady=2)
+            row=10, column=3, padx=(0, 4), pady=2)
         opts.columnconfigure(1, weight=1)
 
         self._on_lossy_toggle()
+        self._on_jxl_toggle()
 
         run_row = ttk.Frame(self)
         run_row.pack(fill="x", **pad)
@@ -494,6 +508,21 @@ class App(tk.Tk):
         self.verify_check.configure(state="disabled" if lossy else "normal")
         self.quality_spin.configure(state="normal" if lossy else "disabled")
 
+    def _on_jxl_toggle(self):
+        jxl = self.to_jxl_var.get()
+        if jxl:
+            self.lossy_var.set(False)
+            self._on_lossy_toggle()
+        self.lossy_check.configure(state="disabled" if jxl else "normal")
+        self.replace_check.configure(state="normal" if jxl else "disabled")
+        self.optimize_check.configure(state="disabled" if jxl else "normal")
+        self.progressive_check.configure(state="disabled" if jxl else "normal")
+        if jxl:
+            self.optimize_var.set(False)
+            self.progressive_var.set(False)
+        else:
+            self.replace_var.set(False)
+
     def _update_count(self):
         self.files_label.config(text=f"Files to process: {len(self.files)}")
 
@@ -563,6 +592,8 @@ class App(tk.Tk):
             "max_effort": self.max_effort_var.get(),
             "progressive": self.progressive_var.get(),
             "lossy_quality": self._lossy_quality(),
+            "to_jxl": self.to_jxl_var.get(),
+            "replace": self.replace_var.get(),
             "dry": self.dryrun_var.get(),
             "passthrough": self.passthrough_var.get(),
             "skip_clean": self.skip_clean_var.get(),
@@ -587,6 +618,17 @@ class App(tk.Tk):
             return
 
         options = self._gather_options()
+        if options["to_jxl"] and not (shutil.which("cjxl") and shutil.which("djxl")):
+            messagebox.showwarning(
+                "JPEG XL", "cjxl and djxl are required for JPEG XL conversion.")
+            return
+        if options["to_jxl"]:
+            options["lossy_quality"] = None
+            if options["replace"] and options["outdir"]:
+                messagebox.showwarning(
+                    "Replace originals",
+                    "Replace is only available in in-place mode; it will be ignored.")
+                options["replace"] = False
         if options["passthrough"] and not options["outdir"]:
             messagebox.showwarning("Passthrough", "Passthrough requires an Output folder.")
             return
@@ -644,6 +686,8 @@ class App(tk.Tk):
         max_effort = options["max_effort"]
         progressive = options["progressive"]
         lossy_quality = options["lossy_quality"]
+        to_jxl = options["to_jxl"]
+        replace = options["replace"]
         dry = options["dry"]
         passthrough = options["passthrough"]
         skip_clean = options["skip_clean"]
@@ -680,6 +724,51 @@ class App(tk.Tk):
                 break
 
             self.log_queue.put(("progress", index - 1, total, os.path.basename(fp)))
+
+            if to_jxl:
+                try:
+                    jxl, orig_size, note = _si.to_jxl_file(
+                        fp, keep_color, keep_orientation, max_effort)
+                except Exception as e:
+                    self.log_queue.put(f"FAIL {fp}: {e}")
+                    fail += 1
+                    continue
+                if jxl is None:
+                    self.log_queue.put(f"SKIP {fp}: {note}")
+                    skipped += 1
+                    continue
+
+                out_path = _si.jxl_output_path(
+                    fp, base_dir, outdir, suffix, prefix_roots)
+                if os.path.exists(out_path):
+                    self.log_queue.put(f"SKIP {fp}: {out_path} already exists")
+                    skipped += 1
+                    continue
+
+                saved = orig_size - len(jxl)
+                if dry:
+                    self.log_queue.put(
+                        f"{fp}: {orig_size} -> {len(jxl)} bytes "
+                        f"(saved {saved}) [cjxl] -> {out_path}")
+                    ok += 1
+                    continue
+
+                try:
+                    _si.write_file_atomic(out_path, jxl, keep_stat_from=fp)
+                    if replace and not outdir:
+                        if backup:
+                            shutil.copy2(fp, fp + ".bak")
+                        os.remove(fp)
+                    total_saved += saved
+                    self.log_queue.put(
+                        f"{fp}: {orig_size} -> {len(jxl)} bytes "
+                        f"(saved {saved}) [cjxl] -> {out_path}")
+                    ok += 1
+                except Exception as e:
+                    self.log_queue.put(f"WRITE FAIL {fp}: {e}")
+                    fail += 1
+                continue
+
             try:
                 new_data, orig_size, changed, tool = _si.process_file(
                     fp, keep_color, keep_orientation, optimize,

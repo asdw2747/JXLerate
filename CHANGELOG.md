@@ -3,6 +3,20 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-11-05
+
+### Added
+- `--to-jxl` lossless JPEG XL transcode:
+  - JPEG is recompressed losslessly and verified **bit-for-bit** by
+    reconstructing with `djxl`.
+  - PNG/WebP/GIF are transcoded mathematically losslessly and verified by
+    decoded-pixel comparison.
+  - WebP is decoded to PNG first because `cjxl` has no WebP reader.
+  - Conversion only happens when the `.jxl` is smaller; originals are kept by
+    default.
+- `--replace` to delete originals after a verified in-place conversion.
+- GUI: **Convert to JPEG XL** and **Replace originals with .jxl** controls.
+
 ## [1.4.0] - 2026-11-05
 
 ### Added
