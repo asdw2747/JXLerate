@@ -1,6 +1,6 @@
 # strip-images
 
-**Version 1.3.1**
+**Version 1.4.0**
 
 Losslessly strip unnecessary metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and
 `.gif` files while keeping the actual image pixel data bit-for-bit identical.
@@ -36,10 +36,34 @@ block:
 - Disable with `--strip-orientation` (CLI) or the GUI's **Preserve orientation**
   checkbox.
 
-The image is never re-encoded, so there is no quality loss. Outputs are
-validated (PNG `IEND`, JPEG `EOI`, GIF trailer, WebP image data) and written
+By default the image is never re-encoded, so there is no quality loss. Outputs
+are validated (PNG `IEND`, JPEG `EOI`, GIF trailer, WebP image data) and written
 atomically so an interrupted run cannot corrupt the original. File permissions
 and timestamps are preserved, and symlinks are followed rather than replaced.
+
+## Saving more space (optional)
+
+Metadata is usually a tiny fraction of an image, so the big savings come from
+pixel-lossless recompression:
+
+- `--optimize` — losslessly recompress the image:
+  - PNG via `oxipng` (falls back to `optipng`); typically **10–20% smaller**.
+  - JPEG via `jpegtran -optimize`; typically **5–8% smaller**.
+  - Lossless WebP re-encoded when it is already lossless.
+  - Only replaces the result when it is smaller; combine with `--verify`.
+- `--max-effort` — slower/better PNG compression (zopfli; can take minutes).
+- `--progressive` — write progressive JPEGs when optimizing (~10% on photos,
+  compared with ~7% for baseline optimization).
+
+**Lossy mode (off by default, changes pixels):**
+
+- `--lossy-quality N` re-encodes JPEG (and static WebP) at quality 1–100.
+  This permanently discards detail. It is never used unless explicitly requested,
+  and it disables `--verify` (which compares pixels exactly).
+  PNG/GIF are not lossily re-encoded.
+
+External tools are optional: missing ones are skipped automatically. Only
+`oxipng`/`optipng`, `jpegtran`, and Pillow are used for optimization.
 
 ## Install / use
 
@@ -58,6 +82,10 @@ Options:
 - `--passthrough` copy non-image files into the output folder too (requires -o)
 - `--keep-color` keep color/rendering metadata (see above)
 - `--strip-orientation` remove the Orientation tag too (not recommended)
+- `--optimize` losslessly recompress for extra savings
+- `--max-effort` slower, better PNG optimization (zopfli)
+- `--progressive` write progressive JPEGs when optimizing
+- `--lossy-quality N` LOSSY JPEG/WebP re-encode (off by default; changes pixels)
 - `--skip-clean` do not write files that already have no metadata to strip
 - `--only-if-smaller` only write when the result is smaller (implies skip-clean)
 - `--suffix S` append suffix to filenames
@@ -86,6 +114,8 @@ Features:
 - Add files/folders, recursion, output folder, suffix, backups, dry-run,
   verification, color preservation, orientation preservation, passthrough,
   skip-clean, and only-if-smaller.
+- Lossless **Optimize** (with **Max effort** and **Progressive JPEG**), plus an
+  off-by-default **Lossy re-encode** with a quality spinbox and confirmation.
 - Determinate progress with the current filename and a **Cancel** button.
 - **Open** button to launch the output folder.
 - Confirmation before overwriting originals in place.

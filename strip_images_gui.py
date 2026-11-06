@@ -141,8 +141,8 @@ class App(tk.Tk):
         self.title(f"{APP_TITLE} v{APP_VERSION}")
         geometry = self.config_data.get("geometry")
         self.geometry(geometry if isinstance(geometry, str) and _GEOMETRY_RE.match(geometry)
-                      else "780x780")
-        self.minsize(660, 640)
+                      else "800x870")
+        self.minsize(680, 720)
         self.configure(bg=THEMES[self.resolved_theme]["window"])
 
         self.files = []
@@ -194,6 +194,11 @@ class App(tk.Tk):
             "verify": self.verify_var.get(),
             "keep_color": self.keep_color_var.get(),
             "keep_orientation": self.keep_orientation_var.get(),
+            "optimize": self.optimize_var.get(),
+            "max_effort": self.max_effort_var.get(),
+            "progressive": self.progressive_var.get(),
+            "lossy": self.lossy_var.get(),
+            "lossy_quality": self.lossy_quality_var.get(),
             "dryrun": self.dryrun_var.get(),
             "passthrough": self.passthrough_var.get(),
             "skip_clean": self.skip_clean_var.get(),
@@ -260,7 +265,8 @@ class App(tk.Tk):
         self._add_check(opts, "Keep .bak of originals", self.backup_var, 0, 1)
 
         self.verify_var = tk.BooleanVar(value=bool(self._opt("verify", True)))
-        self._add_check(opts, "Verify pixels unchanged", self.verify_var, 1, 0)
+        self.verify_check = self._add_check(
+            opts, "Verify pixels unchanged", self.verify_var, 1, 0)
 
         self.keep_color_var = tk.BooleanVar(value=bool(self._opt("keep_color", False)))
         self._add_check(opts, "Keep color info", self.keep_color_var, 1, 1)
@@ -281,8 +287,34 @@ class App(tk.Tk):
             value=bool(self._opt("keep_orientation", True)))
         self._add_check(opts, "Preserve orientation", self.keep_orientation_var, 4, 0)
 
+        self.optimize_var = tk.BooleanVar(value=bool(self._opt("optimize", False)))
+        self._add_check(opts, "Optimize losslessly", self.optimize_var, 5, 0)
+
+        self.max_effort_var = tk.BooleanVar(value=bool(self._opt("max_effort", False)))
+        self._add_check(opts, "Max effort (slow)", self.max_effort_var, 5, 1)
+
+        self.progressive_var = tk.BooleanVar(value=bool(self._opt("progressive", False)))
+        self._add_check(opts, "Progressive JPEG", self.progressive_var, 6, 0)
+
+        self.lossy_var = tk.BooleanVar(value=bool(self._opt("lossy", False)))
+        lossy_frame = ttk.Frame(opts)
+        lossy_frame.grid(row=6, column=1, columnspan=3, sticky="w", padx=4, pady=2)
+        self.lossy_check = tk.Checkbutton(
+            lossy_frame, text="Lossy re-encode (changes pixels)",
+            variable=self.lossy_var, anchor="w",
+            highlightthickness=0, borderwidth=0, takefocus=True,
+            command=self._on_lossy_toggle)
+        self.lossy_check.pack(side="left")
+        self._check_widgets.append(self.lossy_check)
+        ttk.Label(lossy_frame, text="Quality:").pack(side="left", padx=(14, 4))
+        self.lossy_quality_var = tk.StringVar(value=str(self._opt("lossy_quality", 85)))
+        self.quality_spin = ttk.Spinbox(
+            lossy_frame, from_=1, to=100, width=5,
+            textvariable=self.lossy_quality_var)
+        self.quality_spin.pack(side="left")
+
         theme_row = ttk.Frame(opts)
-        theme_row.grid(row=5, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+        theme_row.grid(row=7, column=0, columnspan=3, sticky="w", padx=4, pady=2)
         ttk.Label(theme_row, text="Theme:").pack(side="left", padx=(0, 6))
         for value, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
             radio = tk.Radiobutton(
@@ -292,21 +324,23 @@ class App(tk.Tk):
             radio.pack(side="left", padx=4)
             self._radio_widgets.append(radio)
 
-        ttk.Label(opts, text="Suffix:").grid(row=6, column=0, sticky="w", padx=4, pady=2)
+        ttk.Label(opts, text="Suffix:").grid(row=8, column=0, sticky="w", padx=4, pady=2)
         self.suffix_var = tk.StringVar(value=str(self._opt("suffix", "")))
         ttk.Entry(opts, textvariable=self.suffix_var, width=16).grid(
-            row=6, column=1, sticky="w", padx=4, pady=2)
+            row=8, column=1, sticky="w", padx=4, pady=2)
 
         ttk.Label(opts, text="Output folder (blank = in place):").grid(
-            row=7, column=0, sticky="w", padx=4, pady=2)
+            row=9, column=0, sticky="w", padx=4, pady=2)
         self.outdir_var = tk.StringVar(value=str(self._opt("outdir", "")))
         ttk.Entry(opts, textvariable=self.outdir_var, width=40).grid(
-            row=7, column=1, sticky="we", padx=4, pady=2)
+            row=9, column=1, sticky="we", padx=4, pady=2)
         ttk.Button(opts, text="Browse", command=self.browse_outdir).grid(
-            row=7, column=2, padx=4, pady=2)
+            row=9, column=2, padx=4, pady=2)
         ttk.Button(opts, text="Open", command=self.open_output).grid(
-            row=7, column=3, padx=(0, 4), pady=2)
+            row=9, column=3, padx=(0, 4), pady=2)
         opts.columnconfigure(1, weight=1)
+
+        self._on_lossy_toggle()
 
         run_row = ttk.Frame(self)
         run_row.pack(fill="x", **pad)
@@ -453,6 +487,13 @@ class App(tk.Tk):
             self.status_var.set(f"{index}/{total}")
 
     # -- file selection -----------------------------------------------------
+    def _on_lossy_toggle(self):
+        lossy = self.lossy_var.get()
+        if lossy:
+            self.verify_var.set(False)
+        self.verify_check.configure(state="disabled" if lossy else "normal")
+        self.quality_spin.configure(state="normal" if lossy else "disabled")
+
     def _update_count(self):
         self.files_label.config(text=f"Files to process: {len(self.files)}")
 
@@ -518,11 +559,24 @@ class App(tk.Tk):
             "verify": self.verify_var.get(),
             "keep_color": self.keep_color_var.get(),
             "keep_orientation": self.keep_orientation_var.get(),
+            "optimize": self.optimize_var.get(),
+            "max_effort": self.max_effort_var.get(),
+            "progressive": self.progressive_var.get(),
+            "lossy_quality": self._lossy_quality(),
             "dry": self.dryrun_var.get(),
             "passthrough": self.passthrough_var.get(),
             "skip_clean": self.skip_clean_var.get(),
             "only_smaller": self.only_smaller_var.get(),
         }
+
+    def _lossy_quality(self):
+        if not self.lossy_var.get():
+            return None
+        try:
+            value = int(self.lossy_quality_var.get())
+        except (TypeError, ValueError):
+            value = 85
+        return min(100, max(1, value))
 
     def run(self):
         if self.worker and self.worker.is_alive():
@@ -539,6 +593,13 @@ class App(tk.Tk):
         if options["verify"] and not _si.have_pillow():
             messagebox.showwarning("Verify", "Pillow is not installed; disabling verification.")
             options["verify"] = False
+        if options["lossy_quality"] is not None:
+            options["verify"] = False
+            if not messagebox.askyesno(
+                    "Lossy mode",
+                    "Lossy re-encoding permanently discards image detail and cannot "
+                    "be reversed.\n\nContinue?"):
+                return
         if not options["outdir"] and not options["dry"]:
             if not messagebox.askyesno(
                     "Overwrite originals?",
@@ -579,6 +640,10 @@ class App(tk.Tk):
         verify = options["verify"]
         keep_color = options["keep_color"]
         keep_orientation = options["keep_orientation"]
+        optimize = options["optimize"]
+        max_effort = options["max_effort"]
+        progressive = options["progressive"]
+        lossy_quality = options["lossy_quality"]
         dry = options["dry"]
         passthrough = options["passthrough"]
         skip_clean = options["skip_clean"]
@@ -616,8 +681,9 @@ class App(tk.Tk):
 
             self.log_queue.put(("progress", index - 1, total, os.path.basename(fp)))
             try:
-                new_data, orig_size, changed = _si.strip_file(
-                    fp, keep_color, keep_orientation)
+                new_data, orig_size, changed, tool = _si.process_file(
+                    fp, keep_color, keep_orientation, optimize,
+                    max_effort, progressive, lossy_quality)
             except Exception as e:
                 self.log_queue.put(f"FAIL {fp}: {e}")
                 fail += 1
@@ -653,7 +719,9 @@ class App(tk.Tk):
                 out_path = fp
 
             if dry:
-                self.log_queue.put(f"{fp}: {orig_size} -> {len(new_data)} bytes (saved {saved})")
+                self.log_queue.put(
+                    f"{fp}: {orig_size} -> {len(new_data)} bytes "
+                    f"(saved {saved}) [{tool}]")
                 ok += 1
                 continue
 
@@ -662,7 +730,8 @@ class App(tk.Tk):
                     shutil.copy2(fp, fp + ".bak")
                 _si.write_file_atomic(out_path, new_data, keep_stat_from=fp)
                 self.log_queue.put(
-                    f"{fp}: {orig_size} -> {len(new_data)} bytes (saved {saved}) -> {out_path}")
+                    f"{fp}: {orig_size} -> {len(new_data)} bytes "
+                    f"(saved {saved}) [{tool}] -> {out_path}")
                 ok += 1
             except Exception as e:
                 self.log_queue.put(f"WRITE FAIL {fp}: {e}")

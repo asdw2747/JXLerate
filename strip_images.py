@@ -22,11 +22,12 @@ import os
 import shutil
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import zlib
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
@@ -464,23 +465,226 @@ def strip_gif(data: bytes, keep_color: bool = False,
     return bytes(out)
 
 
+def strip_bytes(data: bytes, ext: str, keep_color: bool = False,
+                keep_orientation: bool = True) -> bytes:
+    ext = ext.lower()
+    if ext == ".png":
+        return strip_png(data, keep_color, keep_orientation)
+    if ext in (".jpg", ".jpeg"):
+        return strip_jpeg(data, keep_color, keep_orientation)
+    if ext == ".webp":
+        return strip_webp(data, keep_color, keep_orientation)
+    if ext == ".gif":
+        return strip_gif(data, keep_color, keep_orientation)
+    raise ValueError(f"unsupported file type: {ext}")
+
+
 def strip_file(path: str, keep_color: bool = False,
                keep_orientation: bool = True) -> tuple[bytes, int, bool]:
     """Return (stripped_bytes, original_size, changed)."""
     with open(path, "rb") as f:
         data = f.read()
-    low = path.lower()
-    if low.endswith(".png"):
-        new = strip_png(data, keep_color, keep_orientation)
-    elif low.endswith(".jpg") or low.endswith(".jpeg"):
-        new = strip_jpeg(data, keep_color, keep_orientation)
-    elif low.endswith(".webp"):
-        new = strip_webp(data, keep_color, keep_orientation)
-    elif low.endswith(".gif"):
-        new = strip_gif(data, keep_color, keep_orientation)
-    else:
-        raise ValueError(f"unsupported file type: {path}")
+    ext = os.path.splitext(path)[1]
+    new = strip_bytes(data, ext, keep_color, keep_orientation)
     return new, len(data), (new != data)
+
+
+# ---------------------------------------------------------------------------
+# Optional recompression / transcoding
+# ---------------------------------------------------------------------------
+
+def _run_tool(cmd, timeout):
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _png_has_chunk(data: bytes, ctype: bytes) -> bool:
+    pos = 8
+    while pos + 12 <= len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        if data[pos + 4:pos + 8] == ctype:
+            return True
+        pos += 12 + length
+    return False
+
+
+def _webp_has_chunk(data: bytes, fourcc: bytes) -> bool:
+    pos = 12
+    while pos + 8 <= len(data):
+        size = struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        if data[pos:pos + 4] == fourcc:
+            return True
+        pos += 8 + size + (size & 1)
+    return False
+
+
+def _optimize_png(data: bytes, max_effort: bool) -> tuple[bytes | None, str | None]:
+    best = data
+    tool = None
+    timeout = 600 if max_effort else 120
+    is_apng = _png_has_chunk(data, b"acTL")
+
+    with tempfile.TemporaryDirectory(prefix="strip-opt-") as td:
+        oxipng = shutil.which("oxipng")
+        if oxipng:
+            path = os.path.join(td, "image.png")
+            with open(path, "wb") as f:
+                f.write(data)
+            cmd = [oxipng, "-o", "6" if max_effort else "4",
+                   "--strip", "safe", "--quiet"]
+            if max_effort:
+                cmd.append("--zopfli")
+            cmd.append(path)
+            if _run_tool(cmd, timeout):
+                with open(path, "rb") as f:
+                    candidate = f.read()
+                if len(candidate) < len(best):
+                    best, tool = candidate, "oxipng"
+
+        optipng = shutil.which("optipng")
+        if optipng and not is_apng and best is data:
+            path = os.path.join(td, "optipng.png")
+            with open(path, "wb") as f:
+                f.write(data)
+            cmd = [optipng, "-quiet", "-o5" if max_effort else "-o2", path]
+            if _run_tool(cmd, timeout):
+                with open(path, "rb") as f:
+                    candidate = f.read()
+                if len(candidate) < len(best):
+                    best, tool = candidate, "optipng"
+
+    return (best, tool) if tool else (None, None)
+
+
+def _optimize_jpeg(data: bytes, progressive: bool) -> tuple[bytes | None, str | None]:
+    jpegtran = shutil.which("jpegtran")
+    if not jpegtran:
+        return None, None
+
+    with tempfile.TemporaryDirectory(prefix="strip-opt-") as td:
+        src = os.path.join(td, "in.jpg")
+        dst = os.path.join(td, "out.jpg")
+        with open(src, "wb") as f:
+            f.write(data)
+        cmd = [jpegtran, "-optimize"]
+        if progressive:
+            cmd.append("-progressive")
+        cmd += ["-copy", "all", "-outfile", dst, src]
+        if _run_tool(cmd, 120):
+            with open(dst, "rb") as f:
+                candidate = f.read()
+            if len(candidate) < len(data):
+                return candidate, "jpegtran"
+    return None, None
+
+
+def _optimize_webp(data: bytes, keep_color: bool) -> tuple[bytes | None, str | None]:
+    # Only safe for static lossless WebP (VP8L); never re-encode lossy WebP.
+    if not _webp_has_chunk(data, b"VP8L") or _webp_has_chunk(data, b"ANMF"):
+        return None, None
+    try:
+        from PIL import Image
+    except Exception:
+        return None, None
+
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.load()
+            kwargs = {"lossless": True, "quality": 100, "method": 6}
+            if keep_color and im.info.get("icc_profile"):
+                kwargs["icc_profile"] = im.info["icc_profile"]
+            out = io.BytesIO()
+            im.save(out, "WEBP", **kwargs)
+        candidate = out.getvalue()
+    except Exception:
+        return None, None
+    if len(candidate) < len(data):
+        return candidate, "cwebp-lossless"
+    return None, None
+
+
+def optimize_bytes(data: bytes, ext: str, keep_color: bool = False,
+                   max_effort: bool = False,
+                   progressive: bool = False) -> tuple[bytes | None, str | None]:
+    """Return (smaller_lossless_bytes, tool_name) or (None, None)."""
+    ext = ext.lower()
+    if ext == ".png":
+        return _optimize_png(data, max_effort)
+    if ext in (".jpg", ".jpeg"):
+        return _optimize_jpeg(data, progressive)
+    if ext == ".webp":
+        return _optimize_webp(data, keep_color)
+    return None, None
+
+
+def _lossy_bytes(data: bytes, ext: str, quality: int,
+                 keep_orientation: bool = True) -> tuple[bytes | None, str | None]:
+    """Re-encode lossily (JPEG/WebP only). Pixels WILL change."""
+    try:
+        from PIL import Image
+    except Exception:
+        return None, None
+
+    ext = ext.lower()
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.load()
+            if getattr(im, "is_animated", False):
+                return None, None
+            exif = im.getexif()
+            keep_exif = bool(keep_orientation and exif.get(ORIENTATION_TAG))
+
+            if ext in (".jpg", ".jpeg"):
+                kwargs = {"quality": quality, "optimize": True, "progressive": True}
+                if keep_exif:
+                    kwargs["exif"] = exif.tobytes()
+                out = io.BytesIO()
+                im.save(out, "JPEG", **kwargs)
+                return out.getvalue(), f"lossy-jpeg q{quality}"
+
+            if ext == ".webp":
+                kwargs = {"quality": quality, "method": 6}
+                if keep_exif:
+                    kwargs["exif"] = exif.tobytes()
+                out = io.BytesIO()
+                im.save(out, "WEBP", **kwargs)
+                return out.getvalue(), f"lossy-webp q{quality}"
+    except Exception:
+        return None, None
+    return None, None
+
+
+def process_file(path: str, keep_color: bool = False,
+                 keep_orientation: bool = True, optimize: bool = False,
+                 max_effort: bool = False, progressive: bool = False,
+                 lossy_quality: int | None = None) -> tuple[bytes, int, bool, str]:
+    """Strip, optionally recompress, and return (data, original_size, changed, tool)."""
+    with open(path, "rb") as f:
+        original = f.read()
+    ext = os.path.splitext(path)[1]
+    data = strip_bytes(original, ext, keep_color, keep_orientation)
+    tool = "metadata"
+
+    if lossy_quality is not None:
+        candidate, name = _lossy_bytes(data, ext, lossy_quality, keep_orientation)
+        if candidate is not None and len(candidate) < len(data):
+            data, tool = candidate, name
+        elif optimize:
+            candidate, name = optimize_bytes(
+                data, ext, keep_color, max_effort, progressive)
+            if candidate is not None and len(candidate) < len(data):
+                data, tool = candidate, name
+    elif optimize:
+        candidate, name = optimize_bytes(
+            data, ext, keep_color, max_effort, progressive)
+        if candidate is not None and len(candidate) < len(data):
+            data, tool = candidate, name
+
+    return data, len(original), (data != original), tool
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +890,14 @@ def main():
                     help="keep color metadata (PNG color chunks, JPEG/WebP/GIF ICC)")
     ap.add_argument("--strip-orientation", action="store_true",
                     help="also remove the EXIF Orientation tag (photos may display rotated)")
+    ap.add_argument("--optimize", action="store_true",
+                    help="losslessly recompress (oxipng/jpegtran/lossless WebP)")
+    ap.add_argument("--max-effort", action="store_true",
+                    help="slower but better PNG optimization (enables zopfli)")
+    ap.add_argument("--progressive", action="store_true",
+                    help="write progressive JPEGs when optimizing")
+    ap.add_argument("--lossy-quality", type=int, metavar="N",
+                    help="LOSSY re-encode JPEG/WebP at quality 1-100 (off by default)")
     ap.add_argument("--passthrough", action="store_true",
                     help="copy non-image files into the output folder too (requires -o)")
     ap.add_argument("--skip-clean", action="store_true",
@@ -699,6 +911,13 @@ def main():
         ap.error("--passthrough requires --output-dir")
     if args.verify and not have_pillow():
         ap.error("--verify requires Pillow (pip install Pillow)")
+    if args.lossy_quality is not None:
+        if not 1 <= args.lossy_quality <= 100:
+            ap.error("--lossy-quality must be between 1 and 100")
+        if args.verify:
+            print("warning: --verify is ignored in lossy mode (pixels change).",
+                  file=sys.stderr)
+            args.verify = False
 
     output_dir = os.path.abspath(args.output_dir) if args.output_dir else None
     exclude_dir = output_dir
@@ -722,8 +941,10 @@ def main():
 
     for fp, base_dir in entries:
         try:
-            new_data, orig_size, changed = strip_file(
-                fp, args.keep_color, not args.strip_orientation)
+            new_data, orig_size, changed, tool = process_file(
+                fp, args.keep_color, not args.strip_orientation,
+                args.optimize, args.max_effort, args.progressive,
+                args.lossy_quality)
         except Exception as e:
             print(f"FAIL {fp}: {e}", file=sys.stderr)
             fail += 1
@@ -761,7 +982,8 @@ def main():
 
         if args.dry_run:
             if not args.quiet:
-                print(f"{fp}: {orig_size} -> {len(new_data)} bytes (saved {saved})")
+                print(f"{fp}: {orig_size} -> {len(new_data)} bytes "
+                      f"(saved {saved}) [{tool}]")
             ok += 1
             continue
 
@@ -775,7 +997,8 @@ def main():
             continue
 
         if not args.quiet:
-            print(f"{fp}: {orig_size} -> {len(new_data)} bytes (saved {saved}) -> {out_path}")
+            print(f"{fp}: {orig_size} -> {len(new_data)} bytes "
+                  f"(saved {saved}) [{tool}] -> {out_path}")
         ok += 1
 
     if passthrough_entries:

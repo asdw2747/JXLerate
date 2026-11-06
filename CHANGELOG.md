@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-11-05
+
+### Added
+- `--optimize` for pixel-lossless recompression: PNG via `oxipng`/`optipng`,
+  JPEG via `jpegtran`, and lossless WebP re-encoding.
+- `--max-effort` (zopfli) and `--progressive` JPEG options.
+- `--lossy-quality N` for explicit, off-by-default JPEG/WebP re-encoding.
+  Lossy mode changes pixels, warns, and disables exact verification.
+- GUI controls for lossless optimize, max effort, progressive JPEG, and an
+  off-by-default lossy mode with a quality spinbox and confirmation dialog.
+
 ## [1.3.1] - 2026-11-05
 
 ### Changed
