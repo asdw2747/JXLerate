@@ -2,3 +2,7 @@ __pycache__/
 *.py[cod]
 *.bak
 .DS_Store
+build/
+dist/
+*.egg-info/
+.venv/

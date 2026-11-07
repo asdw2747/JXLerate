@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-11-07
+
+### Added
+- Installable Python package with `pip`, `pipx`, and `git+https` support.
+  Installing provides the `jxlerate` and `jxlerate-gui` commands.
+- Optional `images` extra for Pillow-dependent features (`--verify`, lossy
+  re-encoding, WebP optimization).
+- GitHub Actions CI that tests Linux, macOS, and Windows on Python 3.10–3.13
+  and verifies the built wheel installs and runs in a clean environment.
+- README installation, upgrade, and platform-specific Tkinter instructions.
+
+### Changed
+- The GUI now imports the core module normally instead of loading it by file
+  path, so it works from both a source checkout and an installed package.
+
 ## [2.0.1] - 2026-11-06
 
 ### Fixed

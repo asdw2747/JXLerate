@@ -1,6 +1,6 @@
 # JXLerate
 
-**Version 2.0.1**
+**Version 2.1.0**
 
 JXLerate is a lossless image archiver and optimizer. It removes unnecessary
 metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly
@@ -9,6 +9,69 @@ integrity manifests — always keeping the actual image pixel data bit-for-bit
 identical.
 
 > Renamed from `strip-images` in v2.0.0. The old command names were removed.
+
+## Install
+
+JXLerate requires **Python 3.10 or newer**. Installing it provides two
+commands: `jxlerate` (CLI) and `jxlerate-gui` (desktop app).
+
+The recommended method is [pipx](https://pipx.pypa.io/), which keeps the tool
+isolated from other Python projects:
+
+```sh
+pipx install "git+https://github.com/asdw2747/JXLerate.git"
+```
+
+Pillow is optional. It is needed for `--verify`, lossy re-encoding, and
+lossless WebP optimization, and it lets verification confirm that retained ICC
+and color metadata survived:
+
+```sh
+pipx inject jxlerate Pillow
+```
+
+To install from a local clone instead (useful for development):
+
+```sh
+git clone https://github.com/asdw2747/JXLerate.git
+cd JXLerate
+pipx install --editable .
+pipx inject jxlerate Pillow
+```
+
+Or with plain pip:
+
+```sh
+python3 -m pip install "jxlerate[images] @ git+https://github.com/asdw2747/JXLerate.git"
+```
+
+From a clone, use `python3 -m pip install ".[images]"`.
+
+### GUI requirements
+
+The GUI uses Tkinter, which is part of the Python standard library but is
+packaged separately on some Linux distributions:
+
+```sh
+# Debian / Ubuntu
+sudo apt install python3-tk
+
+# Fedora
+sudo dnf install python3-tkinter
+
+# Arch
+sudo pacman -S tk
+```
+
+macOS and Windows builds from [python.org](https://www.python.org/) include
+Tkinter. With Homebrew Python, install the matching `python-tk` formula.
+
+### Upgrading and removing
+
+```sh
+pipx reinstall jxlerate   # re-fetch the latest version from git
+pipx uninstall jxlerate
+```
 
 ## What gets removed
 
@@ -112,7 +175,7 @@ External tools are optional: missing ones are skipped automatically.
 Optimization uses `oxipng`/`optipng`, `jpegtran`, and Pillow; JXL uses
 `cjxl`/`djxl`.
 
-## Install / use
+## Usage
 
 ```sh
 jxlerate photo.png photo.jpg photo.webp animation.gif
@@ -191,10 +254,10 @@ GNOME `color-scheme`, then GTK `~/.config/gtk-3.0/settings.ini`, then the
 
 ## Requirements
 
-Python 3.8+. The core stripping tool has no third-party dependencies.
+Python 3.10+. The core stripping tool has no third-party dependencies.
 
 Optional, used only for the matching features:
-- **Pillow** — `--verify`, lossy mode, WebP optimization
+- **Pillow** (`images` extra) — `--verify`, lossy mode, WebP optimization
 - **oxipng** / **optipng** — PNG optimization
 - **jpegtran** — JPEG optimization
 - **cjxl** / **djxl** — JPEG XL conversion

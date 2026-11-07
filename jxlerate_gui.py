@@ -14,12 +14,9 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-# Reuse the core logic from jxlerate.py
-import importlib.util
-_SPEC = importlib.util.spec_from_file_location(
-    "jxlerate", os.path.join(os.path.dirname(os.path.abspath(__file__)), "jxlerate.py"))
-_si = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(_si)
+# Reuse the core logic. This works both when running from the source tree
+# and when installed as a package (both modules ship side by side).
+import jxlerate as _si
 
 APP_TITLE = "JXLerate"
 APP_VERSION = getattr(_si, "__version__", "unknown")

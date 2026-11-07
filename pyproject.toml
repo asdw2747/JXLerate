@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jxlerate"
+dynamic = ["version"]
+description = "Lossless image archiver and optimizer: metadata stripping, recompression, JPEG XL, manifests, and deduplication"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Prisma Chill" }]
+keywords = [
+    "image",
+    "optimization",
+    "lossless",
+    "metadata",
+    "exif",
+    "jpeg-xl",
+    "archival",
+    "png",
+    "jpeg",
+    "webp",
+    "gif",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: System :: Archiving",
+]
+
+[project.optional-dependencies]
+# Needed for --verify, lossy re-encoding, and WebP optimization.
+images = ["Pillow>=9.1"]
+
+[project.urls]
+Homepage = "https://github.com/asdw2747/JXLerate"
+Repository = "https://github.com/asdw2747/JXLerate"
+Changelog = "https://github.com/asdw2747/JXLerate/blob/main/CHANGELOG.md"
+Issues = "https://github.com/asdw2747/JXLerate/issues"
+
+[project.scripts]
+jxlerate = "jxlerate:main"
+
+[project.gui-scripts]
+jxlerate-gui = "jxlerate_gui:main"
+
+[tool.setuptools]
+py-modules = ["jxlerate", "jxlerate_gui"]
+
+[tool.setuptools.dynamic]
+version = { attr = "jxlerate.__version__" }
