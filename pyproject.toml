@@ -50,13 +50,13 @@ Changelog = "https://github.com/asdw2747/JXLerate/blob/main/CHANGELOG.md"
 Issues = "https://github.com/asdw2747/JXLerate/issues"
 
 [project.scripts]
-jxlerate = "jxlerate:main"
+jxlerate = "jxlerate.cli:main"
 
 [project.gui-scripts]
-jxlerate-gui = "jxlerate_gui:main"
+jxlerate-gui = "jxlerate.gui:main"
 
-[tool.setuptools]
-py-modules = ["jxlerate", "jxlerate_gui"]
+[tool.setuptools.packages.find]
+include = ["jxlerate*"]
 
 [tool.setuptools.dynamic]
-version = { attr = "jxlerate.__version__" }
+version = { attr = "jxlerate.version.__version__" }

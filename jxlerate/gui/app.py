@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Prisma Chill
-"""JXLerate GUI: lossless image archiver and optimizer."""
-import json
+"""Tkinter application for JXLerate."""
+
+from __future__ import annotations
+
 import os
 import queue
 import re
@@ -10,131 +11,26 @@ import shutil
 import subprocess
 import sys
 import threading
-
+import time
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from dataclasses import replace
+from tkinter import filedialog, messagebox, ttk
 
-# Reuse the core logic. This works both when running from the source tree
-# and when installed as a package (both modules ship side by side).
-import jxlerate as _si
+from ..core import RunOptions
+from ..imaging import have_pillow
+from ..version import __version__
+from .config import (
+    THEMES,
+    detect_system_theme,
+    load_config,
+    save_config,
+)
+from .worker import DoneEvent, LogEvent, ProgressEvent, run_worker
 
 APP_TITLE = "JXLerate"
-APP_VERSION = getattr(_si, "__version__", "unknown")
-DONE = "__done__"
-
-CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "jxlerate")
-CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-OLD_CONFIG_PATH = os.path.join(
-    os.path.expanduser("~"), ".config", "strip-images", "config.json")
+APP_VERSION = __version__
 
 _GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
-
-THEMES = {
-    "dark": {
-        "window": "#232629",
-        "base": "#31363b",
-        "alt_base": "#2b2e32",
-        "text": "#eff0f1",
-        "muted": "#a0a4a8",
-        "disabled": "#6d7176",
-        "select_bg": "#2a82da",
-        "select_fg": "#ffffff",
-        "border": "#4f565c",
-        "button": "#3b4045",
-        "button_active": "#4a5056",
-        "trough": "#1b1e20",
-        "accent": "#3daee9",
-        "log_bg": "#1b1e20",
-    },
-    "light": {
-        "window": "#f0f0f0",
-        "base": "#ffffff",
-        "alt_base": "#f7f7f7",
-        "text": "#1a1a1a",
-        "muted": "#555555",
-        "disabled": "#9a9a9a",
-        "select_bg": "#308cc6",
-        "select_fg": "#ffffff",
-        "border": "#c8c8c8",
-        "button": "#e6e6e6",
-        "button_active": "#dcdcdc",
-        "trough": "#d9d9d9",
-        "accent": "#308cc6",
-        "log_bg": "#ffffff",
-    },
-}
-
-
-def migrate_config():
-    """Carry settings over from the old strip-images config location."""
-    if os.path.exists(OLD_CONFIG_PATH) and not os.path.exists(CONFIG_PATH):
-        try:
-            os.makedirs(CONFIG_DIR, exist_ok=True)
-            shutil.copy2(OLD_CONFIG_PATH, CONFIG_PATH)
-        except Exception:
-            pass
-
-
-def load_config():
-    migrate_config()
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            if data.get("theme") not in ("auto", "light", "dark"):
-                data["theme"] = "auto"
-            if not isinstance(data.get("options"), dict):
-                data["options"] = {}
-            return data
-    except Exception:
-        pass
-    return {"theme": "auto", "options": {}}
-
-
-def save_config(config):
-    try:
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        tmp = CONFIG_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-        os.replace(tmp, CONFIG_PATH)
-    except Exception:
-        pass
-
-
-def detect_system_theme() -> str:
-    """Return 'dark' or 'light' based on the desktop's preference."""
-    try:
-        result = subprocess.run(
-            ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-            capture_output=True, text=True, timeout=1.5)
-        value = result.stdout.strip().strip("'").lower()
-        if "dark" in value:
-            return "dark"
-        if value in ("default", "prefer-light", "light"):
-            return "light"
-    except Exception:
-        pass
-
-    try:
-        path = os.path.expanduser("~/.config/gtk-3.0/settings.ini")
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("gtk-application-prefer-dark-theme"):
-                    _, _, value = line.partition("=")
-                    if value.strip().lower() in ("1", "true", "yes"):
-                        return "dark"
-    except Exception:
-        pass
-
-    try:
-        if "dark" in os.environ.get("GTK_THEME", "").lower():
-            return "dark"
-    except Exception:
-        pass
-
-    return "light"
 
 
 class App(tk.Tk):
@@ -164,6 +60,8 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="Ready")
         self.last_output_dir = None
         self._poll_id = None
+        self._closing = False
+        self._close_deadline = 0.0
 
         self._build_ui()
         self.apply_theme(self.theme_mode)
@@ -222,6 +120,29 @@ class App(tk.Tk):
 
     def _on_close(self):
         self._save_settings()
+        if self.worker and self.worker.is_alive():
+            # Ask the worker to stop and wait briefly for it to unwind.  The
+            # worker only touches the queue, so destroying the UI after the
+            # timeout is safe even if a long external tool is still running.
+            self._closing = True
+            self.cancel_event.set()
+            self.status_var.set("Cancelling...")
+            if self._poll_id:
+                try:
+                    self.after_cancel(self._poll_id)
+                except Exception:
+                    pass
+                self._poll_id = None
+            self._close_deadline = time.monotonic() + 3.0
+            self.after(100, self._finish_close)
+            return
+        self.destroy()
+
+    def _finish_close(self):
+        if (self.worker and self.worker.is_alive()
+                and time.monotonic() < self._close_deadline):
+            self.after(100, self._finish_close)
+            return
         self.destroy()
 
     def _on_destroy(self, event):
@@ -487,20 +408,20 @@ class App(tk.Tk):
     def _poll_queue(self):
         try:
             while True:
-                msg = self.log_queue.get_nowait()
-                if isinstance(msg, tuple):
-                    if msg and msg[0] == DONE:
-                        self._finish(msg[1])
-                    elif msg and msg[0] == "progress":
-                        _, index, total, name = msg
-                        self._set_progress(index, total, name)
-                    else:
-                        self.log_msg(str(msg))
+                event = self.log_queue.get_nowait()
+                if isinstance(event, DoneEvent):
+                    if not self._closing:
+                        self._finish(event.summary)
+                elif isinstance(event, ProgressEvent):
+                    self._set_progress(event.done, event.total, event.name)
+                elif isinstance(event, LogEvent):
+                    self.log_msg(event.text)
                 else:
-                    self.log_msg(msg)
+                    self.log_msg(str(event))
         except queue.Empty:
             pass
-        self._poll_id = self.after(100, self._poll_queue)
+        if not self._closing:
+            self._poll_id = self.after(100, self._poll_queue)
 
     def _set_progress(self, index, total, name):
         total = max(total, 1)
@@ -540,7 +461,9 @@ class App(tk.Tk):
         paths = filedialog.askopenfilenames(
             title="Select images",
             filetypes=[
-                ("Images", "*.png *.jpg *.jpeg *.webp *.gif *.PNG *.JPG *.JPEG *.WEBP *.GIF"),
+                ("Images",
+                 "*.png *.jpg *.jpeg *.webp *.gif "
+                 "*.PNG *.JPG *.JPEG *.WEBP *.GIF"),
                 ("All files", "*.*"),
             ])
         for p in paths:
@@ -589,26 +512,26 @@ class App(tk.Tk):
 
     # -- run ----------------------------------------------------------------
     def _gather_options(self):
-        return {
-            "inputs": list(self.files),
-            "recursive": self.recursive_var.get(),
-            "outdir": self.outdir_var.get().strip() or None,
-            "suffix": self.suffix_var.get().strip(),
-            "backup": self.backup_var.get(),
-            "verify": self.verify_var.get(),
-            "keep_color": self.keep_color_var.get(),
-            "keep_orientation": self.keep_orientation_var.get(),
-            "optimize": self.optimize_var.get(),
-            "max_effort": self.max_effort_var.get(),
-            "progressive": self.progressive_var.get(),
-            "lossy_quality": self._lossy_quality(),
-            "to_jxl": self.to_jxl_var.get(),
-            "replace": self.replace_var.get(),
-            "dry": self.dryrun_var.get(),
-            "passthrough": self.passthrough_var.get(),
-            "skip_clean": self.skip_clean_var.get(),
-            "only_smaller": self.only_smaller_var.get(),
-        }
+        return RunOptions(
+            inputs=tuple(self.files),
+            recursive=self.recursive_var.get(),
+            output_dir=self.outdir_var.get().strip() or None,
+            suffix=self.suffix_var.get().strip(),
+            backup=self.backup_var.get(),
+            verify=self.verify_var.get(),
+            keep_color=self.keep_color_var.get(),
+            keep_orientation=self.keep_orientation_var.get(),
+            optimize=self.optimize_var.get(),
+            max_effort=self.max_effort_var.get(),
+            progressive=self.progressive_var.get(),
+            lossy_quality=self._lossy_quality(),
+            to_jxl=self.to_jxl_var.get(),
+            replace=self.replace_var.get(),
+            dry_run=self.dryrun_var.get(),
+            passthrough=self.passthrough_var.get(),
+            skip_clean=self.skip_clean_var.get(),
+            only_if_smaller=self.only_smaller_var.get(),
+        )
 
     def _lossy_quality(self):
         if not self.lossy_var.get():
@@ -628,35 +551,35 @@ class App(tk.Tk):
             return
 
         options = self._gather_options()
-        if options["to_jxl"] and not (shutil.which("cjxl") and shutil.which("djxl")):
+        if options.to_jxl and not (shutil.which("cjxl") and shutil.which("djxl")):
             messagebox.showwarning(
                 "JPEG XL", "cjxl and djxl are required for JPEG XL conversion.")
             return
-        if options["to_jxl"]:
-            options["lossy_quality"] = None
-            if options["replace"] and options["outdir"]:
+        if options.to_jxl:
+            options = replace(options, lossy_quality=None)
+            if options.replace and options.output_dir:
                 messagebox.showwarning(
                     "Replace originals",
                     "Replace is only available in in-place mode; it will be ignored.")
-                options["replace"] = False
-        if options["passthrough"] and not options["outdir"]:
+                options = replace(options, replace=False)
+        if options.passthrough and not options.output_dir:
             messagebox.showwarning("Passthrough", "Passthrough requires an Output folder.")
             return
-        if options["verify"] and not _si.have_pillow():
+        if options.verify and not have_pillow():
             messagebox.showwarning("Verify", "Pillow is not installed; disabling verification.")
-            options["verify"] = False
-        if options["lossy_quality"] is not None:
-            if not _si.have_pillow():
+            options = replace(options, verify=False)
+        if options.lossy_quality is not None:
+            if not have_pillow():
                 messagebox.showerror(
                     "Lossy mode", "Pillow is required for lossy re-encoding.")
                 return
-            options["verify"] = False
+            options = replace(options, verify=False)
             if not messagebox.askyesno(
                     "Lossy mode",
                     "Lossy re-encoding permanently discards image detail and cannot "
                     "be reversed.\n\nContinue?"):
                 return
-        if not options["outdir"] and not options["dry"]:
+        if not options.output_dir and not options.dry_run:
             if not messagebox.askyesno(
                     "Overwrite originals?",
                     "No output folder is set, so the original files will be modified "
@@ -669,7 +592,10 @@ class App(tk.Tk):
         self.cancel_btn.config(state="normal")
         self.progress.configure(maximum=1, value=0)
         self.status_var.set("Starting...")
-        self.worker = threading.Thread(target=self._run_worker, args=(options,), daemon=True)
+        self.worker = threading.Thread(
+            target=run_worker,
+            args=(options, self.log_queue, self.cancel_event),
+            daemon=True)
         self.worker.start()
 
     def cancel_run(self):
@@ -678,242 +604,46 @@ class App(tk.Tk):
             self.cancel_btn.config(state="disabled")
             self.status_var.set("Cancelling...")
 
-    def _run_worker(self, options):
-        try:
-            summary = self._process(options)
-        except Exception as e:
-            self.log_queue.put(f"ERROR: {e}")
-            summary = None
-        finally:
-            self.log_queue.put((DONE, summary))
-
-    def _process(self, options):
-        inputs = options["inputs"]
-        recursive = options["recursive"]
-        outdir = os.path.abspath(options["outdir"]) if options["outdir"] else None
-        suffix = options["suffix"]
-        backup = options["backup"]
-        verify = options["verify"]
-        keep_color = options["keep_color"]
-        keep_orientation = options["keep_orientation"]
-        optimize = options["optimize"]
-        max_effort = options["max_effort"]
-        progressive = options["progressive"]
-        lossy_quality = options["lossy_quality"]
-        to_jxl = options["to_jxl"]
-        replace = options["replace"]
-        dry = options["dry"]
-        passthrough = options["passthrough"]
-        skip_clean = options["skip_clean"]
-        only_smaller = options["only_smaller"]
-
-        exclude = outdir
-        dir_inputs = [p for p in inputs if os.path.isdir(p)]
-        prefix_roots = len(dir_inputs) > 1
-
-        entries = _si.collect_file_entries(inputs, recursive, exclude)
-        if outdir:
-            self.last_output_dir = outdir
-        if not entries and not (passthrough and outdir):
-            self.log_queue.put("No image files found.")
-            return "none"
-
-        passthrough_entries = []
-        if passthrough and outdir:
-            passthrough_entries = _si.collect_passthrough_entries(
-                inputs, recursive, prefix_roots, exclude)
-
-        planned_outputs = []
-        output_pairs = []
-        for fp, base_dir in entries:
-            if to_jxl:
-                out_path = _si.jxl_output_path(
-                    fp, base_dir, outdir, suffix, prefix_roots)
-            elif outdir:
-                out_path = _si.output_path_for(
-                    fp, base_dir, outdir, suffix, prefix_roots)
-            elif suffix:
-                name, ext = os.path.splitext(os.path.basename(fp))
-                out_path = os.path.join(os.path.dirname(fp), name + suffix + ext)
-            else:
-                out_path = fp
-            planned_outputs.append(out_path)
-            output_pairs.append((fp, out_path))
-
-        passthrough_pairs = [
-            (src, os.path.join(outdir, rel)) for src, rel in passthrough_entries
-        ]
-        output_pairs.extend(passthrough_pairs)
-        source_paths = ([fp for fp, _ in entries] +
-                        [src for src, _ in passthrough_entries])
-        try:
-            _si.validate_output_plan(output_pairs, source_paths)
-        except ValueError as e:
-            self.log_queue.put(f"OUTPUT PLAN FAIL: {e}")
-            return (0, 0, 1, 0, False)
-
-        total = len(entries)
-        self.log_queue.put(f"Processing {total} image file(s)...")
-        self.log_queue.put(("progress", 0, total, ""))
-        total_saved = 0
-        ok = 0
-        skipped = 0
-        fail = 0
-        cancelled = False
-
-        for index, ((fp, base_dir), planned_out_path) in enumerate(
-                zip(entries, planned_outputs), 1):
-            if self.cancel_event.is_set():
-                cancelled = True
-                break
-
-            self.log_queue.put(("progress", index - 1, total, os.path.basename(fp)))
-
-            if to_jxl:
-                try:
-                    jxl, orig_size, note = _si.to_jxl_file(
-                        fp, keep_color, keep_orientation, max_effort)
-                except Exception as e:
-                    self.log_queue.put(f"FAIL {fp}: {e}")
-                    fail += 1
-                    continue
-                if jxl is None:
-                    self.log_queue.put(f"SKIP {fp}: {note}")
-                    skipped += 1
-                    continue
-
-                out_path = planned_out_path
-                if os.path.exists(out_path):
-                    self.log_queue.put(f"SKIP {fp}: {out_path} already exists")
-                    skipped += 1
-                    continue
-
-                saved = orig_size - len(jxl)
-                if dry:
-                    self.log_queue.put(
-                        f"{fp}: {orig_size} -> {len(jxl)} bytes "
-                        f"(saved {saved}) [cjxl] -> {out_path}")
-                    ok += 1
-                    continue
-
-                try:
-                    _si.write_file_atomic(out_path, jxl, keep_stat_from=fp)
-                    if replace and not outdir:
-                        if backup:
-                            shutil.copy2(fp, fp + ".bak")
-                        os.remove(fp)
-                    total_saved += saved
-                    self.log_queue.put(
-                        f"{fp}: {orig_size} -> {len(jxl)} bytes "
-                        f"(saved {saved}) [cjxl] -> {out_path}")
-                    ok += 1
-                except Exception as e:
-                    self.log_queue.put(f"WRITE FAIL {fp}: {e}")
-                    fail += 1
-                continue
-
-            try:
-                new_data, orig_size, changed, tool = _si.process_file(
-                    fp, keep_color, keep_orientation, optimize,
-                    max_effort, progressive, lossy_quality)
-            except Exception as e:
-                self.log_queue.put(f"FAIL {fp}: {e}")
-                fail += 1
-                continue
-
-            saved = orig_size - len(new_data)
-
-            skip_reason = None
-            if only_smaller and (not changed or len(new_data) >= orig_size):
-                skip_reason = "no smaller result"
-            elif skip_clean and not changed:
-                skip_reason = "already clean"
-            if skip_reason:
-                self.log_queue.put(f"SKIP {fp}: {skip_reason}")
-                skipped += 1
-                continue
-
-            if verify and not _si.verify_lossless(
-                    fp, new_data, keep_color, keep_orientation):
-                self.log_queue.put(f"VERIFY FAILED {fp}: pixels differ or output invalid!")
-                fail += 1
-                continue
-
-            out_path = planned_out_path
-
-            if dry:
-                self.log_queue.put(
-                    f"{fp}: {orig_size} -> {len(new_data)} bytes "
-                    f"(saved {saved}) [{tool}]")
-                total_saved += saved
-                ok += 1
-                continue
-
-            try:
-                if backup and out_path == fp:
-                    shutil.copy2(fp, fp + ".bak")
-                _si.write_file_atomic(out_path, new_data, keep_stat_from=fp)
-                total_saved += saved
-                self.log_queue.put(
-                    f"{fp}: {orig_size} -> {len(new_data)} bytes "
-                    f"(saved {saved}) [{tool}] -> {out_path}")
-                ok += 1
-            except Exception as e:
-                self.log_queue.put(f"WRITE FAIL {fp}: {e}")
-                fail += 1
-
-        if cancelled:
-            self.log_queue.put("Cancelled by user.")
-        else:
-            if passthrough_entries:
-                if dry:
-                    self.log_queue.put(
-                        f"Passthrough: would copy {len(passthrough_entries)} non-image file(s).")
-                else:
-                    try:
-                        n = _si.copy_passthrough(passthrough_entries, outdir)
-                        self.log_queue.put(f"Passthrough: copied {n} non-image file(s).")
-                    except Exception as e:
-                        self.log_queue.put(f"PASSTHROUGH FAIL: {e}")
-                        fail += 1
-
-        if not cancelled:
-            self.log_queue.put(("progress", total, total, ""))
-        self.log_queue.put(
-            f"\nDone: {ok} ok, {skipped} skipped, {fail} failed, "
-            f"total saved {total_saved} bytes")
-        return (ok, skipped, fail, total_saved, cancelled)
-
     def _finish(self, summary):
         self.run_btn.config(state="normal")
         self.cancel_btn.config(state="disabled")
         self._save_settings()
 
-        if summary == "none":
+        if summary is None:
+            self.status_var.set("Failed")
+            return
+
+        if summary.output_dir:
+            self.last_output_dir = summary.output_dir
+
+        if summary.no_images:
+            self.log_msg("No image files found.")
             self.status_var.set("No image files found")
-            messagebox.showwarning("No files", "No image files found in the selected inputs.")
-        elif isinstance(summary, tuple):
-            ok, skipped, fail, saved, cancelled = summary
-            state = "Cancelled" if cancelled else "Finished"
-            self.status_var.set(
-                f"{state}: {ok} ok, {skipped} skipped, {fail} failed, "
-                f"{saved} bytes saved")
-            if cancelled:
-                messagebox.showinfo(
-                    "Cancelled",
-                    f"Stopped after {ok} file(s).\n"
-                    f"Skipped: {skipped}   Failed: {fail}\nSaved: {saved} bytes.")
-            else:
-                messagebox.showinfo(
-                    "Finished",
-                    f"Done: {ok} ok, {skipped} skipped, {fail} failed.\n"
-                    f"Total saved: {saved} bytes.")
+            messagebox.showwarning(
+                "No files", "No image files found in the selected inputs.")
+            return
 
+        if summary.error:
+            self.log_msg(f"OUTPUT PLAN FAIL: {summary.error}")
+            self.status_var.set("Failed: output plan")
+            messagebox.showerror("Output plan", summary.error)
+            return
 
-def main():
-    app = App()
-    app.mainloop()
-
-
-if __name__ == "__main__":
-    main()
+        self.log_msg(
+            f"\nDone: {summary.ok} ok, {summary.skipped} skipped, "
+            f"{summary.failed} failed, total saved {summary.saved} bytes")
+        state = "Cancelled" if summary.cancelled else "Finished"
+        self.status_var.set(
+            f"{state}: {summary.ok} ok, {summary.skipped} skipped, "
+            f"{summary.failed} failed, {summary.saved} bytes saved")
+        if summary.cancelled:
+            messagebox.showinfo(
+                "Cancelled",
+                f"Stopped after {summary.ok} file(s).\n"
+                f"Skipped: {summary.skipped}   Failed: {summary.failed}\n"
+                f"Saved: {summary.saved} bytes.")
+        else:
+            messagebox.showinfo(
+                "Finished",
+                f"Done: {summary.ok} ok, {summary.skipped} skipped, "
+                f"{summary.failed} failed.\nTotal saved: {summary.saved} bytes.")

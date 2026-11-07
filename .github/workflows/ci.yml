@@ -68,8 +68,8 @@ jobs:
           "import importlib.metadata as md;
           c = {e.name: e.value for e in md.entry_points(group='console_scripts')};
           g = {e.name: e.value for e in md.entry_points(group='gui_scripts')};
-          assert c['jxlerate'] == 'jxlerate:main', c;
-          assert g['jxlerate-gui'] == 'jxlerate_gui:main', g;
+          assert c['jxlerate'] == 'jxlerate.cli:main', c;
+          assert g['jxlerate-gui'] == 'jxlerate.gui:main', g;
           print('entry points ok')"
 
       - uses: actions/upload-artifact@v4

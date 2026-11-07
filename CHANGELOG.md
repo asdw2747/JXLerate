@@ -3,6 +3,31 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.2.0] - 2026-11-07
+
+### Changed
+- Reorganized the application into focused modules: `formats/` (PNG, JPEG,
+  WebP, GIF, EXIF), `imaging`, `jxl`, `tools`, `fs`, `manifest`, `dedupe`,
+  `core`, and `gui/`.
+- The CLI and GUI now share one `core.run_batch()` pipeline instead of
+  maintaining duplicate per-file loops.
+- The GUI worker uses immutable `RunOptions` and typed `LogEvent`,
+  `ProgressEvent`, and `DoneEvent` messages. It no longer writes
+  `last_output_dir`; the output folder travels back in `RunSummary`.
+- Closing the GUI during a run now cancels the worker and waits briefly for it
+  to stop before destroying the window.
+- Removed dead `strip_file()` and `collect_files()` helpers and merged
+  duplicate output-path and chunk-inspection helpers.
+- Package entry points are now `jxlerate.cli:main` and `jxlerate.gui:main`;
+  `python -m jxlerate` is also supported.
+- The flat `import jxlerate` API remains available for compatibility.
+
+### Fixed
+- JXL dry runs now include their planned savings in the GUI total, matching
+  the CLI summary.
+- GUI output-plan failures now show an error dialog instead of a misleading
+  "Finished" summary.
+
 ## [2.1.1] - 2026-11-07
 
 ### Fixed

@@ -1,6 +1,6 @@
 # JXLerate
 
-**Version 2.1.1**
+**Version 2.2.0**
 
 JXLerate is a lossless image archiver and optimizer. It removes unnecessary
 metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly
@@ -261,6 +261,29 @@ Optional, used only for the matching features:
 - **oxipng** / **optipng** — PNG optimization
 - **jpegtran** — JPEG optimization
 - **cjxl** / **djxl** — JPEG XL conversion
+
+## Project layout
+
+The implementation is split into focused modules so format handling and the
+shared batch pipeline stay independent:
+
+```
+jxlerate/
+├── cli.py          command-line parsing and validation
+├── core.py         RunOptions, RunSummary, shared run_batch() pipeline
+├── formats/        PNG, JPEG, WebP, GIF, and EXIF handling
+├── imaging.py      verification and Pillow-based re-encoding
+├── jxl.py          JPEG XL transcoding
+├── tools.py        external-tool invocation
+├── fs.py           atomic writes, collection, output planning, safety checks
+├── manifest.py     manifest rows, writing, and verification
+├── dedupe.py       metadata-safe hardlink deduplication
+└── gui/            Tkinter app, config, and thread-safe worker bridge
+```
+
+Both front-ends call `jxlerate.core.run_batch()`, and the GUI worker
+communicates only through typed events on a queue. Existing flat imports such
+as `import jxlerate; jxlerate.strip_png(...)` remain supported.
 
 ## Tests
 
