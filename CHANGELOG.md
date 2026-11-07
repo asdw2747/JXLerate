@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.1.1] - 2026-11-07
+
+### Fixed
+- Windows CI: the deduplication regression test now creates its metadata
+  difference with modification time, since Windows cannot represent POSIX
+  permission modes. Mode-based coverage remains a separate Linux/macOS test.
+
 ## [2.1.0] - 2026-11-07
 
 ### Added

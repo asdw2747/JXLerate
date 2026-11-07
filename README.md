@@ -1,6 +1,6 @@
 # JXLerate
 
-**Version 2.1.0**
+**Version 2.1.1**
 
 JXLerate is a lossless image archiver and optimizer. It removes unnecessary
 metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly

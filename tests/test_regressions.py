@@ -138,30 +138,50 @@ class ArchiveSafetyTests(unittest.TestCase):
                 csv.writer(f).writerow(jxlerate.MANIFEST_FIELDS)
             self.assertGreater(jxlerate.verify_manifest(empty)[1], 0)
 
+    @staticmethod
+    def _write_duplicates(directory):
+        paths = tuple(
+            os.path.join(directory, name)
+            for name in ("first.jpg", "same.jpg", "different.jpg"))
+        for path in paths:
+            with open(path, "wb") as f:
+                f.write(b"identical content")
+        return paths
+
+    def _assert_only_matching_pair_linked(self, paths):
+        first, same_metadata, different_metadata = paths
+        try:
+            links, _, failures = jxlerate.dedupe_entries(
+                [(first, None), (same_metadata, None),
+                 (different_metadata, None)])
+        except OSError as exc:
+            self.skipTest(f"hardlinks unavailable: {exc}")
+        self.assertEqual((links, failures), (1, 0))
+        self.assertTrue(os.path.samefile(first, same_metadata))
+        self.assertFalse(os.path.samefile(first, different_metadata))
+
+    def test_dedupe_does_not_merge_different_timestamps(self):
+        # Modification time behaves consistently on Windows and POSIX, unlike
+        # permission bits (Windows only models the read-only attribute).
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self._write_duplicates(directory)
+            timestamp = 1_700_000_000_000_000_000
+            for path in paths[:2]:
+                os.utime(path, ns=(timestamp, timestamp))
+            os.utime(paths[2], ns=(timestamp + 5_000_000_000,) * 2)
+            self._assert_only_matching_pair_linked(paths)
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot represent POSIX modes")
     def test_dedupe_does_not_merge_different_modes(self):
         with tempfile.TemporaryDirectory() as directory:
-            first = os.path.join(directory, "first.jpg")
-            same_metadata = os.path.join(directory, "same.jpg")
-            different_metadata = os.path.join(directory, "different.jpg")
-            for path in (first, same_metadata, different_metadata):
-                with open(path, "wb") as f:
-                    f.write(b"identical content")
-            os.chmod(first, 0o644)
-            os.chmod(same_metadata, 0o644)
-            os.chmod(different_metadata, 0o600)
+            paths = self._write_duplicates(directory)
+            os.chmod(paths[0], 0o644)
+            os.chmod(paths[1], 0o644)
+            os.chmod(paths[2], 0o600)
             timestamp = 1_700_000_000_000_000_000
-            for path in (first, same_metadata, different_metadata):
+            for path in paths:
                 os.utime(path, ns=(timestamp, timestamp))
-
-            try:
-                links, _, failures = jxlerate.dedupe_entries(
-                    [(first, None), (same_metadata, None),
-                     (different_metadata, None)])
-            except OSError as exc:
-                self.skipTest(f"hardlinks unavailable: {exc}")
-            self.assertEqual((links, failures), (1, 0))
-            self.assertTrue(os.path.samefile(first, same_metadata))
-            self.assertFalse(os.path.samefile(first, different_metadata))
+            self._assert_only_matching_pair_linked(paths)
 
 
 if __name__ == "__main__":

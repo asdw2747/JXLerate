@@ -31,7 +31,7 @@ import sys
 import tempfile
 import zlib
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 
