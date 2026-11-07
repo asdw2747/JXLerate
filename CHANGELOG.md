@@ -3,6 +3,22 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.3.0] - 2026-11-07
+
+### Added
+- `-j, --jobs N` processes up to N files in parallel (`0` = all CPU cores).
+  The default stays `1`, so existing runs are unchanged. Results, log lines,
+  and manifest rows remain in input order, and planning, validation,
+  deduplication, and passthrough copying stay serial.
+- `--skip-existing` skips planned destinations that already exist, so an
+  interrupted `-o`/`--suffix` batch can be finished by re-running the same
+  command with this flag. Passthrough files are skipped too.
+- GUI: **Parallel jobs** spinbox and **Skip existing outputs** checkbox.
+
+### Changed
+- Parallel processing uses a small pool of daemon threads rather than
+  `ThreadPoolExecutor`, so a long external tool cannot delay GUI shutdown.
+
 ## [2.2.0] - 2026-11-07
 
 ### Changed

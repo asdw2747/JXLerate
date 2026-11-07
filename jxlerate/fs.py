@@ -120,11 +120,13 @@ def collect_passthrough_entries(inputs, recursive, prefix_roots, exclude_dir=Non
     return entries
 
 
-def copy_passthrough(entries, output_dir):
+def copy_passthrough(entries, output_dir, skip_existing=False):
     count = 0
     for src, rel in entries:
         dst = os.path.join(output_dir, rel)
         if canonical_path(src) == canonical_path(dst):
+            continue
+        if skip_existing and os.path.exists(dst):
             continue
         os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
         shutil.copy2(src, dst)

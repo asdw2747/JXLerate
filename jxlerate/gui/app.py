@@ -113,6 +113,8 @@ class App(tk.Tk):
             "passthrough": self.passthrough_var.get(),
             "skip_clean": self.skip_clean_var.get(),
             "only_smaller": self.only_smaller_var.get(),
+            "skip_existing": self.skip_existing_var.get(),
+            "jobs": self.jobs_var.get(),
             "suffix": self.suffix_var.get(),
             "outdir": self.outdir_var.get(),
         }
@@ -220,6 +222,10 @@ class App(tk.Tk):
             value=bool(self._opt("keep_orientation", True)))
         self._add_check(opts, "Preserve orientation", self.keep_orientation_var, 4, 0)
 
+        self.skip_existing_var = tk.BooleanVar(
+            value=bool(self._opt("skip_existing", False)))
+        self._add_check(opts, "Skip existing outputs", self.skip_existing_var, 4, 1)
+
         self.optimize_var = tk.BooleanVar(value=bool(self._opt("optimize", False)))
         self.optimize_check = self._add_check(
             opts, "Optimize losslessly", self.optimize_var, 5, 0)
@@ -282,6 +288,16 @@ class App(tk.Tk):
             row=10, column=2, padx=4, pady=2)
         ttk.Button(opts, text="Open", command=self.open_output).grid(
             row=10, column=3, padx=(0, 4), pady=2)
+
+        jobs_row = ttk.Frame(opts)
+        jobs_row.grid(row=11, column=0, columnspan=4, sticky="w", padx=4, pady=2)
+        ttk.Label(jobs_row, text="Parallel jobs:").pack(side="left", padx=(0, 6))
+        self.jobs_var = tk.StringVar(value=str(self._opt("jobs", 1)))
+        self.jobs_spin = ttk.Spinbox(
+            jobs_row, from_=0, to=64, width=5, textvariable=self.jobs_var)
+        self.jobs_spin.pack(side="left")
+        ttk.Label(jobs_row, text="(0 = all CPU cores)").pack(side="left", padx=(6, 0))
+
         opts.columnconfigure(1, weight=1)
 
         self._on_lossy_toggle()
@@ -531,7 +547,16 @@ class App(tk.Tk):
             passthrough=self.passthrough_var.get(),
             skip_clean=self.skip_clean_var.get(),
             only_if_smaller=self.only_smaller_var.get(),
+            jobs=self._jobs(),
+            skip_existing=self.skip_existing_var.get(),
         )
+
+    def _jobs(self):
+        try:
+            value = int(self.jobs_var.get())
+        except (TypeError, ValueError):
+            value = 1
+        return max(0, value)
 
     def _lossy_quality(self):
         if not self.lossy_var.get():

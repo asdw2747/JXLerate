@@ -82,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="do not write files that have nothing to strip")
     ap.add_argument("--only-if-smaller", action="store_true",
                     help="only write when the result is smaller (implies --skip-clean)")
+    ap.add_argument("--skip-existing", action="store_true",
+                    help="skip planned outputs that already exist (resume -o/--suffix runs)")
+    ap.add_argument("-j", "--jobs", type=int, default=1, metavar="N",
+                    help="process up to N files in parallel (0 = all CPU cores; default 1)")
     ap.add_argument("-q", "--quiet", action="store_true", help="suppress per-file output")
     return ap
 
@@ -92,6 +96,8 @@ def main():
 
     if args.passthrough and not args.output_dir:
         ap.error("--passthrough requires --output-dir")
+    if args.jobs < 0:
+        ap.error("--jobs must be 0 or greater (0 = all CPU cores)")
     if args.verify and not have_pillow():
         ap.error("--verify requires Pillow (pip install Pillow)")
     if args.lossy_quality is not None:
@@ -123,7 +129,7 @@ def main():
 
     if args.dedupe:
         if args.to_jxl or args.optimize or args.lossy_quality is not None \
-                or args.output_dir or args.manifest:
+                or args.output_dir or args.manifest or args.skip_existing:
             ap.error("--dedupe cannot be combined with processing options")
         print("Note: hardlinked paths share later content/metadata changes and "
               "access time; creating links changes ctime. Files with differing "
@@ -155,6 +161,8 @@ def main():
         only_if_smaller=args.only_if_smaller,
         manifest=args.manifest,
         quiet=args.quiet,
+        jobs=args.jobs,
+        skip_existing=args.skip_existing,
     )
 
     summary = run_batch(options, ConsoleReporter(args.quiet))

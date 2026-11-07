@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import os
+import queue
 import shutil
+import threading
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from .formats import optimize_bytes, strip_bytes
 from .fs import (
+    canonical_path,
     collect_file_entries,
     collect_passthrough_entries,
     copy_passthrough,
@@ -55,14 +58,22 @@ class RunOptions:
     only_if_smaller: bool = False
     manifest: str | None = None
     quiet: bool = False
+    jobs: int = 1
+    skip_existing: bool = False
 
     def normalized(self) -> "RunOptions":
         """Return a copy with stable input types and an absolute output dir."""
         inputs = tuple(os.fspath(path) for path in self.inputs)
         output_dir = os.path.abspath(self.output_dir) if self.output_dir else None
-        if inputs == self.inputs and output_dir == self.output_dir:
+        jobs = self.jobs
+        if jobs == 0:
+            jobs = os.cpu_count() or 1
+        elif jobs < 0:
+            jobs = 1
+        if (inputs == self.inputs and output_dir == self.output_dir
+                and jobs == self.jobs):
             return self
-        return replace(self, inputs=inputs, output_dir=output_dir)
+        return replace(self, inputs=inputs, output_dir=output_dir, jobs=jobs)
 
 
 @dataclass
@@ -269,9 +280,129 @@ def _process_standard(source: str, output: str, options: RunOptions) -> FileResu
 
 def process_one(source: str, output: str, options: RunOptions) -> FileResult:
     """Process a single planned file without printing or touching the UI."""
+    if (options.skip_existing
+            and canonical_path(source) != canonical_path(output)
+            and os.path.exists(output)):
+        try:
+            source_size = os.path.getsize(source)
+        except OSError:
+            source_size = 0
+        return FileResult(
+            source, output, source_size, 0, "skip", "skipped: exists",
+            message=f"SKIP {source}: {output} already exists")
     if options.to_jxl:
         return _process_jxl(source, output, options)
     return _process_standard(source, output, options)
+
+
+def _record_result(summary: RunSummary, result: FileResult,
+                   options: RunOptions, reporter: Reporter,
+                   manifest_dir: str) -> None:
+    if options.manifest:
+        summary.manifest_rows.append(manifest_row(
+            result.source, result.output or "", result.source_size,
+            result.output_size, result.digest, result.tool, result.status,
+            manifest_dir))
+
+    if result.status in ("written", "dry-run"):
+        summary.ok += 1
+        summary.saved += result.saved
+    elif result.status.startswith("skipped:"):
+        summary.skipped += 1
+    else:
+        summary.failed += 1
+
+    if result.message:
+        if result.status in ("failed", "verify-failed"):
+            reporter.error(result.message)
+        else:
+            reporter.log(result.message)
+
+
+def _iter_results(entries, planned_outputs, options: RunOptions,
+                  reporter: Reporter, cancel_event):
+    """Yield ``(source, result)`` in input order.
+
+    ``jobs == 1`` processes serially.  With more jobs, a small pool of daemon
+    threads claims inputs in order while results are buffered and yielded in
+    input order, keeping logs and manifests deterministic.
+    """
+    total = len(entries)
+    jobs = max(1, min(options.jobs, total))
+
+    if jobs == 1:
+        for index, ((source, _base_dir), output) in enumerate(
+                zip(entries, planned_outputs)):
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            reporter.progress(index, total, os.path.basename(source))
+            yield source, process_one(source, output, options)
+        return
+
+    done_queue: "queue.Queue" = queue.Queue()
+    lock = threading.Lock()
+    state = {"next": 0, "stopped": False}
+
+    def worker():
+        try:
+            while True:
+                with lock:
+                    if state["stopped"] or state["next"] >= total:
+                        return
+                    if cancel_event is not None and cancel_event.is_set():
+                        state["stopped"] = True
+                        return
+                    index = state["next"]
+                    state["next"] += 1
+
+                source, _base_dir = entries[index]
+                output = planned_outputs[index]
+                try:
+                    result = process_one(source, output, options)
+                except BaseException as exc:
+                    result = FileResult(
+                        source, output, 0, 0, "", "failed",
+                        message=f"FAIL {source}: {exc}")
+                done_queue.put((index, source, result))
+        finally:
+            done_queue.put(None)
+
+    threads = [
+        threading.Thread(target=worker, daemon=True,
+                         name=f"jxlerate-worker-{number}")
+        for number in range(jobs)
+    ]
+    for thread in threads:
+        thread.start()
+
+    buffered = {}
+    next_index = 0
+    completed = 0
+    finished_workers = 0
+    try:
+        while finished_workers < len(threads):
+            item = done_queue.get()
+            if item is None:
+                finished_workers += 1
+                continue
+            index, source, result = item
+            completed += 1
+            reporter.progress(completed, total, os.path.basename(source))
+            buffered[index] = result
+            while next_index in buffered:
+                yield entries[next_index][0], buffered.pop(next_index)
+                next_index += 1
+
+        # Every result arrived before its worker's sentinel; flush any tail
+        # that was waiting on a slower earlier file.
+        while next_index in buffered:
+            yield entries[next_index][0], buffered.pop(next_index)
+            next_index += 1
+    finally:
+        # Stop claiming new work if the consumer closes early (for example
+        # because a reporter raised).
+        with lock:
+            state["stopped"] = True
 
 
 def run_batch(options: RunOptions, reporter: Reporter,
@@ -320,34 +451,15 @@ def run_batch(options: RunOptions, reporter: Reporter,
                     if options.manifest else "")
 
     reporter.start(len(entries))
-    for index, ((source, _base_dir), output) in enumerate(
-            zip(entries, planned_outputs), 1):
-        if cancel_event is not None and cancel_event.is_set():
-            summary.cancelled = True
-            break
+    processed = 0
+    for source, result in _iter_results(
+            entries, planned_outputs, options, reporter, cancel_event):
+        _record_result(summary, result, options, reporter, manifest_dir)
+        processed += 1
 
-        reporter.progress(index - 1, len(entries), os.path.basename(source))
-        result = process_one(source, output, options)
-
-        if options.manifest:
-            summary.manifest_rows.append(manifest_row(
-                result.source, result.output or "", result.source_size,
-                result.output_size, result.digest, result.tool, result.status,
-                manifest_dir))
-
-        if result.status in ("written", "dry-run"):
-            summary.ok += 1
-            summary.saved += result.saved
-        elif result.status.startswith("skipped:"):
-            summary.skipped += 1
-        else:
-            summary.failed += 1
-
-        if result.message:
-            if result.status in ("failed", "verify-failed"):
-                reporter.error(result.message)
-            else:
-                reporter.log(result.message)
+    if (cancel_event is not None and cancel_event.is_set()
+            and processed < len(entries)):
+        summary.cancelled = True
 
     if summary.cancelled:
         reporter.log("Cancelled by user.")
@@ -355,12 +467,17 @@ def run_batch(options: RunOptions, reporter: Reporter,
 
     if passthrough_entries:
         if options.dry_run:
+            pending = len(passthrough_entries)
+            if options.skip_existing:
+                pending = sum(
+                    1 for _src, rel in passthrough_entries
+                    if not os.path.exists(os.path.join(output_dir, rel)))
             reporter.notice(
-                f"Passthrough: would copy {len(passthrough_entries)} "
-                "non-image file(s).")
+                f"Passthrough: would copy {pending} non-image file(s).")
         else:
             try:
-                count = copy_passthrough(passthrough_entries, output_dir)
+                count = copy_passthrough(
+                    passthrough_entries, output_dir, options.skip_existing)
                 reporter.notice(
                     f"Passthrough: copied {count} non-image file(s).")
             except Exception as exc:

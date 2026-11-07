@@ -1,6 +1,6 @@
 # JXLerate
 
-**Version 2.2.0**
+**Version 2.3.0**
 
 JXLerate is a lossless image archiver and optimizer. It removes unnecessary
 metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly
@@ -185,6 +185,8 @@ jxlerate --optimize -r ./photos
 jxlerate --to-jxl -r ./photos -o ./archive
 jxlerate --verify --backup file.png
 jxlerate --skip-clean -r ./photos
+jxlerate -r ./photos -o ./archive --jobs 4
+jxlerate -r ./photos -o ./archive --skip-existing
 ```
 
 Options:
@@ -205,6 +207,8 @@ Options:
 - `--dedupe` hardlink duplicate images and exit (use with `-r`)
 - `--skip-clean` do not write files that already have no metadata to strip
 - `--only-if-smaller` only write when the result is smaller (implies skip-clean)
+- `--skip-existing` skip planned outputs that already exist (see below)
+- `-j, --jobs N` process up to N files in parallel (default 1; `0` = all CPU cores)
 - `--suffix S` append suffix to filenames
 - `--backup` keep a `.bak` of the original (in-place mode)
 - `--dry-run` report savings without writing
@@ -220,6 +224,19 @@ overwrite each other.
 Explicit file inputs that map to the same output name are rejected before any
 files are written.
 
+### Parallel runs and resuming
+
+- `-j, --jobs N` processes up to N files at once. The default is `1`, so
+  resource use is unchanged unless requested; `--jobs 0` uses every CPU core.
+  Log lines and manifest rows stay in the original input order, and output
+  planning, collision checks, passthrough copying, and deduplication remain
+  serial for safety. Each file is still written atomically.
+- `--skip-existing` skips any planned destination that already exists. Re-run
+  an interrupted `-o`/`--suffix` batch with the same command plus this flag to
+  finish only the missing files. Because writes are atomic, an existing output
+  is always complete. It trusts that the source did not change in the meantime;
+  use `--manifest`/`--verify-manifest` when you need content verification.
+
 ## GUI
 
 A Tkinter GUI is included:
@@ -232,7 +249,8 @@ Features:
 
 - Add files/folders, recursion, output folder, suffix, backups, dry-run,
   verification, color preservation, orientation preservation, passthrough,
-  skip-clean, and only-if-smaller.
+  skip-clean, only-if-smaller, and skip-existing.
+- **Parallel jobs** spinbox (`0` = all CPU cores) for faster batches.
 - Lossless **Optimize** (with **Max effort** and **Progressive JPEG**), plus an
   off-by-default **Lossy re-encode** with a quality spinbox and confirmation.
 - **Convert to JPEG XL** with an optional **Replace originals with .jxl**
