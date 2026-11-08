@@ -18,11 +18,13 @@ def is_image(name: str) -> bool:
 
 
 def write_file_atomic(path: str, data: bytes,
-                      keep_stat_from: str | None = None) -> None:
+                      keep_stat_from: str | None = None,
+                      preserve_mode: bool = False) -> None:
     """Write data atomically, preserving mode/mtime and following symlinks.
 
     keep_stat_from is the original file whose permissions and timestamps
-    should be carried over to the replacement.
+    should be carried over to the replacement.  preserve_mode keeps the
+    destination's permission bits without carrying over its timestamps.
     """
     # If path is a symlink, update its target instead of replacing the link.
     target = os.path.realpath(path) if os.path.islink(path) else path
@@ -35,6 +37,11 @@ def write_file_atomic(path: str, data: bytes,
             source_stat = os.stat(keep_stat_from)  # follows symlinks
         except OSError:
             source_stat = None
+    elif preserve_mode:
+        try:
+            source_stat = os.stat(target)
+        except OSError:
+            source_stat = None
 
     fd, tmp = tempfile.mkstemp(prefix=".strip-", dir=directory)
     try:
@@ -42,7 +49,10 @@ def write_file_atomic(path: str, data: bytes,
             f.write(data)
         if source_stat is not None:
             os.chmod(tmp, stat.S_IMODE(source_stat.st_mode))
-            os.utime(tmp, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+            if keep_stat_from:
+                os.utime(
+                    tmp,
+                    ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         os.replace(tmp, target)
     except BaseException:
         try:

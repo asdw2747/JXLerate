@@ -81,6 +81,7 @@ from .fs import (
     write_file_atomic,
 )
 from .manifest import MANIFEST_FIELDS, write_manifest, verify_manifest
+from .logs import LOG_EXTENSIONS, log_search_roots, patch_archive_logs
 from .dedupe import (
     dedupe_entries,
     hardlink_metadata_signature as _hardlink_metadata_signature,
@@ -102,6 +103,7 @@ __all__ = [
     "ORIENTATION_TAG",
     "PIL_COLOR_INFO_KEYS",
     "MANIFEST_FIELDS",
+    "LOG_EXTENSIONS",
     "RunOptions",
     "FileResult",
     "RunSummary",
@@ -129,5 +131,7 @@ __all__ = [
     "write_file_atomic",
     "write_manifest",
     "verify_manifest",
+    "log_search_roots",
+    "patch_archive_logs",
     "dedupe_entries",
 ]

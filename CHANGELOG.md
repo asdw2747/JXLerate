@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.0] - 2026-11-07
+
+### Added
+- `--patch-logs` (requires `--to-jxl --replace`) updates whole-filename
+  references to converted images in `.html`, `.json`, and `.txt` files under
+  the input folders. Discovery follows `-r` for directory inputs; explicit file
+  inputs scan only their containing folder.
+- Matching is case-insensitive but bounded to complete filenames, so
+  `cat.png` is not found inside `copycat.png`, `my-cat.png`, or `cat.png.bak`.
+- Rewrites are atomic and only happen when a reference changed. UTF-8/UTF-16
+  BOMs, CRLF/LF line endings, and Unicode text are preserved; undecodable files
+  are skipped untouched. A log write failure keeps the original image instead
+  of deleting it.
+- GUI: **Patch log references** checkbox, enabled only for JPEG XL + Replace.
+- Parallel workers share a lock while patching, so concurrent conversions
+  cannot lose log updates.
+
+### Changed
+- `write_file_atomic()` gained `preserve_mode` for rewriting existing text
+  files without carrying over their old timestamps.
+
 ## [2.3.0] - 2026-11-07
 
 ### Added

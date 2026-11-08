@@ -31,6 +31,7 @@ from .fs import (
 )
 from .imaging import lossy_bytes, verify_lossless
 from .jxl import to_jxl_file
+from .logs import log_search_roots, patch_archive_logs
 from .manifest import manifest_row
 
 
@@ -60,6 +61,7 @@ class RunOptions:
     quiet: bool = False
     jobs: int = 1
     skip_existing: bool = False
+    patch_logs: bool = False
 
     def normalized(self) -> "RunOptions":
         """Return a copy with stable input types and an absolute output dir."""
@@ -89,6 +91,8 @@ class FileResult:
     digest: str = ""
     saved: int = 0
     message: str = ""
+    logs_patched: int = 0
+    logs_failed: int = 0
 
 
 @dataclass
@@ -180,7 +184,8 @@ def process_file(source: str, options: RunOptions) -> tuple[bytes, int, bool, st
     return data, len(original), (data != original), tool
 
 
-def _process_jxl(source: str, output: str, options: RunOptions) -> FileResult:
+def _process_jxl(source: str, output: str, options: RunOptions,
+                 log_roots=None) -> FileResult:
     try:
         jxl, orig_size, note = to_jxl_file(
             source, options.keep_color, options.keep_orientation,
@@ -208,12 +213,27 @@ def _process_jxl(source: str, output: str, options: RunOptions) -> FileResult:
             message=(f"{source}: {orig_size} -> {len(jxl)} bytes "
                      f"(saved {saved}) [cjxl] -> {output}"))
 
+    logs_patched = 0
+    logs_failed = 0
     try:
         write_file_atomic(output, jxl, keep_stat_from=source)
+        if options.patch_logs:
+            try:
+                roots = (log_roots if log_roots is not None
+                         else log_search_roots(options.inputs,
+                                               options.recursive))
+                logs_patched, logs_failed = patch_archive_logs(
+                    roots, os.path.basename(source), os.path.basename(output))
+            except Exception:
+                logs_failed += 1
         if options.replace and not options.output_dir:
-            if options.backup:
-                shutil.copy2(source, source + ".bak")
-            os.remove(source)
+            # Keep the original if requested log references could not be
+            # updated; deleting it would leave the archive pointing at a
+            # missing file.
+            if not logs_failed:
+                if options.backup:
+                    shutil.copy2(source, source + ".bak")
+                os.remove(source)
     except Exception as exc:
         return FileResult(
             source, output, orig_size, len(jxl), "cjxl", "failed",
@@ -224,7 +244,8 @@ def _process_jxl(source: str, output: str, options: RunOptions) -> FileResult:
         source, output, orig_size, len(jxl), "cjxl", "written",
         digest=digest, saved=saved,
         message=(f"{source}: {orig_size} -> {len(jxl)} bytes "
-                 f"(saved {saved}) [cjxl] -> {output}"))
+                 f"(saved {saved}) [cjxl] -> {output}"),
+        logs_patched=logs_patched, logs_failed=logs_failed)
 
 
 def _process_standard(source: str, output: str, options: RunOptions) -> FileResult:
@@ -278,7 +299,8 @@ def _process_standard(source: str, output: str, options: RunOptions) -> FileResu
                  f"(saved {saved}) [{tool}] -> {output}"))
 
 
-def process_one(source: str, output: str, options: RunOptions) -> FileResult:
+def process_one(source: str, output: str, options: RunOptions,
+                log_roots=None) -> FileResult:
     """Process a single planned file without printing or touching the UI."""
     if (options.skip_existing
             and canonical_path(source) != canonical_path(output)
@@ -291,7 +313,7 @@ def process_one(source: str, output: str, options: RunOptions) -> FileResult:
             source, output, source_size, 0, "skip", "skipped: exists",
             message=f"SKIP {source}: {output} already exists")
     if options.to_jxl:
-        return _process_jxl(source, output, options)
+        return _process_jxl(source, output, options, log_roots)
     return _process_standard(source, output, options)
 
 
@@ -318,9 +340,19 @@ def _record_result(summary: RunSummary, result: FileResult,
         else:
             reporter.log(result.message)
 
+    if result.logs_patched or result.logs_failed:
+        details = [f"{result.logs_patched} updated"]
+        if result.logs_failed:
+            details.append(f"{result.logs_failed} failed")
+        reporter.log(f"LOGS {result.source}: {', '.join(details)}")
+    if (result.logs_failed and options.replace and not options.output_dir):
+        reporter.notice(
+            f"LOG PATCH FAIL {result.source}: original kept because log "
+            "references could not be updated")
+
 
 def _iter_results(entries, planned_outputs, options: RunOptions,
-                  reporter: Reporter, cancel_event):
+                  reporter: Reporter, cancel_event, log_roots=None):
     """Yield ``(source, result)`` in input order.
 
     ``jobs == 1`` processes serially.  With more jobs, a small pool of daemon
@@ -336,7 +368,7 @@ def _iter_results(entries, planned_outputs, options: RunOptions,
             if cancel_event is not None and cancel_event.is_set():
                 return
             reporter.progress(index, total, os.path.basename(source))
-            yield source, process_one(source, output, options)
+            yield source, process_one(source, output, options, log_roots)
         return
 
     done_queue: "queue.Queue" = queue.Queue()
@@ -358,7 +390,7 @@ def _iter_results(entries, planned_outputs, options: RunOptions,
                 source, _base_dir = entries[index]
                 output = planned_outputs[index]
                 try:
-                    result = process_one(source, output, options)
+                    result = process_one(source, output, options, log_roots)
                 except BaseException as exc:
                     result = FileResult(
                         source, output, 0, 0, "", "failed",
@@ -451,9 +483,12 @@ def run_batch(options: RunOptions, reporter: Reporter,
                     if options.manifest else "")
 
     reporter.start(len(entries))
+    log_roots = (log_search_roots(options.inputs, options.recursive)
+                 if options.patch_logs else None)
     processed = 0
     for source, result in _iter_results(
-            entries, planned_outputs, options, reporter, cancel_event):
+            entries, planned_outputs, options, reporter, cancel_event,
+            log_roots):
         _record_result(summary, result, options, reporter, manifest_dir)
         processed += 1
 

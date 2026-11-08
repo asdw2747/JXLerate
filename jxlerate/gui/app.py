@@ -109,6 +109,7 @@ class App(tk.Tk):
             "lossy_quality": self.lossy_quality_var.get(),
             "to_jxl": self.to_jxl_var.get(),
             "replace": self.replace_var.get(),
+            "patch_logs": self.patch_logs_var.get(),
             "dryrun": self.dryrun_var.get(),
             "passthrough": self.passthrough_var.get(),
             "skip_clean": self.skip_clean_var.get(),
@@ -262,6 +263,12 @@ class App(tk.Tk):
         self.replace_var = tk.BooleanVar(value=bool(self._opt("replace", False)))
         self.replace_check = self._add_check(
             opts, "Replace originals with .jxl", self.replace_var, 7, 1)
+        self.replace_check.configure(command=self._update_patch_logs_state)
+
+        self.patch_logs_var = tk.BooleanVar(
+            value=bool(self._opt("patch_logs", False)))
+        self.patch_logs_check = self._add_check(
+            opts, "Patch log references", self.patch_logs_var, 7, 2)
 
         theme_row = ttk.Frame(opts)
         theme_row.grid(row=8, column=0, columnspan=3, sticky="w", padx=4, pady=2)
@@ -469,6 +476,14 @@ class App(tk.Tk):
             self.progressive_var.set(False)
         else:
             self.replace_var.set(False)
+        self._update_patch_logs_state()
+
+    def _update_patch_logs_state(self):
+        enabled = self.to_jxl_var.get() and self.replace_var.get()
+        self.patch_logs_check.configure(
+            state="normal" if enabled else "disabled")
+        if not enabled:
+            self.patch_logs_var.set(False)
 
     def _update_count(self):
         self.files_label.config(text=f"Files to process: {len(self.files)}")
@@ -543,6 +558,9 @@ class App(tk.Tk):
             lossy_quality=self._lossy_quality(),
             to_jxl=self.to_jxl_var.get(),
             replace=self.replace_var.get(),
+            patch_logs=(self.patch_logs_var.get()
+                        and self.to_jxl_var.get()
+                        and self.replace_var.get()),
             dry_run=self.dryrun_var.get(),
             passthrough=self.passthrough_var.get(),
             skip_clean=self.skip_clean_var.get(),

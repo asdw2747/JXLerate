@@ -103,7 +103,7 @@ class CorePipelineTests(unittest.TestCase):
             output_dir = os.path.join(directory, "out")
             manifest = os.path.join(directory, "manifest.csv")
 
-            def fake_process_one(source, output, options):
+            def fake_process_one(source, output, options, log_roots=None):
                 # Finish in reverse order to force out-of-order completions.
                 position = order.index(os.path.basename(source))
                 time.sleep(0.02 * (len(order) - position))

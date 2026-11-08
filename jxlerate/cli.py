@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="losslessly transcode to JPEG XL (.jxl)")
     ap.add_argument("--replace", action="store_true",
                     help="with --to-jxl, delete originals after verified conversion")
+    ap.add_argument("--patch-logs", action="store_true",
+                    help="with --to-jxl --replace, update .html/.json/.txt image references")
     ap.add_argument("--manifest", metavar="FILE",
                     help="write a SHA-256 CSV manifest of results")
     ap.add_argument("--verify-manifest", metavar="FILE",
@@ -113,6 +115,8 @@ def main():
         ap.error("--to-jxl cannot be combined with --lossy-quality")
     if args.replace and not args.to_jxl:
         ap.error("--replace requires --to-jxl")
+    if args.patch_logs and not (args.to_jxl and args.replace):
+        ap.error("--patch-logs requires --to-jxl and --replace")
     if args.replace and args.output_dir:
         ap.error("--replace cannot be combined with --output-dir")
     if args.to_jxl and not (shutil.which("cjxl") and shutil.which("djxl")):
@@ -155,6 +159,7 @@ def main():
         lossy_quality=args.lossy_quality,
         to_jxl=args.to_jxl,
         replace=args.replace,
+        patch_logs=args.patch_logs,
         dry_run=args.dry_run,
         passthrough=args.passthrough,
         skip_clean=args.skip_clean,

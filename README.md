@@ -1,6 +1,6 @@
 # JXLerate
 
-**Version 2.3.0**
+**Version 2.4.0**
 
 JXLerate is a lossless image archiver and optimizer. It removes unnecessary
 metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly
@@ -136,6 +136,11 @@ For much larger savings, `--to-jxl` converts to JPEG XL (requires `cjxl`/`djxl`)
   decoded pixels for the others), and only kept when smaller.
 - Originals are kept by default. Add `--replace` to delete them after a
   verified conversion (in-place mode only).
+- Add `--patch-logs` with `--replace` to update whole-filename references to
+  converted images inside `.html`, `.json`, and `.txt` files under the input
+  folders. Only files with an actual match are rewritten (atomically), with
+  their encoding, BOM, and line endings preserved; undecodable files are left
+  untouched. If a log cannot be updated, the original image is kept.
 - Animated inputs are skipped for now.
 - JXL viewer support is still limited, but it is an ISO standard
   (ISO/IEC 18181) designed for archival use.
@@ -183,6 +188,7 @@ jxlerate -r ./photos
 jxlerate -r ./photos -o ./archive
 jxlerate --optimize -r ./photos
 jxlerate --to-jxl -r ./photos -o ./archive
+jxlerate --to-jxl --replace --patch-logs -r ./photos
 jxlerate --verify --backup file.png
 jxlerate --skip-clean -r ./photos
 jxlerate -r ./photos -o ./archive --jobs 4
@@ -202,6 +208,7 @@ Options:
 - `--lossy-quality N` LOSSY JPEG/WebP re-encode (off by default; changes pixels)
 - `--to-jxl` losslessly transcode to JPEG XL (requires `cjxl`/`djxl`)
 - `--replace` with `--to-jxl`, delete originals after verified conversion
+- `--patch-logs` with `--to-jxl --replace`, update `.html`/`.json`/`.txt` image references
 - `--manifest FILE` write a SHA-256 CSV manifest of results
 - `--verify-manifest FILE` verify a manifest and exit
 - `--dedupe` hardlink duplicate images and exit (use with `-r`)
@@ -255,6 +262,7 @@ Features:
   off-by-default **Lossy re-encode** with a quality spinbox and confirmation.
 - **Convert to JPEG XL** with an optional **Replace originals with .jxl**
   checkbox. Lossy and same-format optimize are disabled while JXL is selected.
+  **Patch log references** is available once Replace is checked.
 - Determinate progress with the current filename and a **Cancel** button.
 - **Open** button to launch the output folder.
 - Confirmation before overwriting originals in place.
@@ -294,6 +302,7 @@ jxlerate/
 ├── jxl.py          JPEG XL transcoding
 ├── tools.py        external-tool invocation
 ├── fs.py           atomic writes, collection, output planning, safety checks
+├── logs.py         archive-aware .html/.json/.txt reference patching
 ├── manifest.py     manifest rows, writing, and verification
 ├── dedupe.py       metadata-safe hardlink deduplication
 └── gui/            Tkinter app, config, and thread-safe worker bridge
