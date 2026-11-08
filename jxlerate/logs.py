@@ -13,6 +13,7 @@ import codecs
 import os
 import re
 import threading
+from collections.abc import Callable
 
 from .fs import canonical_path, write_file_atomic
 
@@ -100,17 +101,39 @@ def _iter_log_files(roots):
                         yield entry.path
 
 
-def _filename_pattern(name: str) -> re.Pattern:
-    """Match a complete filename, not a substring of a longer name.
+def _filename_pattern(name: str) -> re.Pattern | None:
+    """Match a complete filename with an optional Discord-style hash.
+
+    DiscordChatExporter appends a short hex tracking hash to references
+    (``IMG_7320-5eb75cfcf2d6578914.jpg``) while the file on disk keeps its
+    clean name (``IMG_7320.jpg``).  The pattern therefore matches the base
+    name, an optional ``-<hex hash>`` group, and the original extension.
 
     The lookarounds exclude word characters, dots, and hyphens so that
     ``cat.png`` does not match ``copycat.png``, ``my-cat.png``, or
     ``cat.png.bak``.  Characters such as ``/``, ``\\``, quotes, commas,
-    ``?``, ``#`` and ``)`` are valid boundaries.
+    ``?``, ``#`` and ``)`` are valid boundaries.  A trailing lookahead is
+    required as well, otherwise ``cat-abc123def456.pngx`` would match.
+
+    Bare names without an extension return ``None``: matching those would
+    over-match unrelated text.
     """
+    base_name, old_ext = os.path.splitext(name)
+    if not old_ext:
+        return None
     return re.compile(
-        r"(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])",
+        r"(?<![A-Za-z0-9_.-])"
+        + re.escape(base_name)
+        + r"(?P<hash>-[a-fA-F0-9]{8,})?"
+        + re.escape(old_ext)
+        + r"(?![A-Za-z0-9_.-])",
         re.IGNORECASE)
+
+
+def _replacement(new_name: str) -> Callable[[re.Match], str]:
+    """Keep any captured hash, swapping only the extension."""
+    new_base, new_ext = os.path.splitext(new_name)
+    return lambda match: new_base + (match.group("hash") or "") + new_ext
 
 
 def _decode(raw: bytes):
@@ -127,7 +150,8 @@ def _decode(raw: bytes):
         return None
 
 
-def _patch_file(path: str, pattern: re.Pattern, new_name: str) -> bool:
+def _patch_file(path: str, pattern: re.Pattern,
+                replace: Callable[[re.Match], str]) -> bool:
     with _PATCH_LOCK:
         with open(path, "rb") as handle:
             raw = handle.read()
@@ -137,7 +161,7 @@ def _patch_file(path: str, pattern: re.Pattern, new_name: str) -> bool:
             return False
         text, encoding, bom = decoded
 
-        updated, count = pattern.subn(new_name, text)
+        updated, count = pattern.subn(replace, text)
         if not count or updated == text:
             return False
 
@@ -152,8 +176,10 @@ def patch_archive_logs(roots, old_filename: str,
 
     ``roots`` is an iterable of ``(directory, recurse)`` pairs from
     :func:`log_search_roots`.  Returns ``(patched, failed)`` counts.  Matching
-    is case-insensitive; the replacement is the real new filename, which keeps
-    references correct on case-sensitive filesystems.
+    is case-insensitive and accepts an optional Discord-style trailing hex
+    hash, which is preserved verbatim; only the extension changes.  The
+    replacement base is the real new filename, which keeps references correct
+    on case-sensitive filesystems.
     """
     old_name = os.path.basename(old_filename)
     new_name = os.path.basename(new_filename)
@@ -161,11 +187,15 @@ def patch_archive_logs(roots, old_filename: str,
         return 0, 0
 
     pattern = _filename_pattern(old_name)
+    if pattern is None:
+        return 0, 0
+
+    replace = _replacement(new_name)
     patched = 0
     failed = 0
     for path in _iter_log_files(roots):
         try:
-            if _patch_file(path, pattern, new_name):
+            if _patch_file(path, pattern, replace):
                 patched += 1
         except Exception:
             failed += 1

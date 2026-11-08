@@ -3,6 +3,26 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.1] - 2026-11-07
+
+### Fixed
+- `--patch-logs` now matches Discord/DiscordChatExporter references that append
+  a hex tracking hash to the filename. The clean base name is matched together
+  with an optional `-<hex hash>` suffix and the original extension; the hash is
+  preserved verbatim while only the extension changes
+  (`IMG_7320-5eb75cfcf2d6578914.jpg` -> `IMG_7320-5eb75cfcf2d6578914.jxl`).
+  Hashless references still patch as before.
+- A suffix counts as a hash only when it is a hyphen followed by at least eight
+  hex characters, so short or non-hex names such as `photo-2024.jpg` are not
+  rewritten. Boundaries still reject `copycat-...`, `my-cat-...`,
+  `....png.bak`, and `....pngx`.
+
+### Changed
+- `tests/test_logs.py` covers hashed references across every supported
+  extension, hash/extension case preservation, minimum hash length, wrong
+  extensions, extension suffixes (`?x=1`, `#frag`), and Discord-style end-to-end
+  conversion.
+
 ## [2.4.0] - 2026-11-07
 
 ### Added

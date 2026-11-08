@@ -1,6 +1,6 @@
 # JXLerate
 
-**Version 2.4.0**
+**Version 2.4.1**
 
 JXLerate is a lossless image archiver and optimizer. It removes unnecessary
 metadata from `.png`, `.jpg`/`.jpeg`, `.webp`, and `.gif` files, can losslessly
@@ -141,6 +141,11 @@ For much larger savings, `--to-jxl` converts to JPEG XL (requires `cjxl`/`djxl`)
   folders. Only files with an actual match are rewritten (atomically), with
   their encoding, BOM, and line endings preserved; undecodable files are left
   untouched. If a log cannot be updated, the original image is kept.
+- Discord/DiscordChatExporter references carry a trailing hex tracking hash
+  (`IMG_7320-5eb75cfcf2d6578914.jpg`). Matching ignores that hash and preserves
+  it verbatim, so only the extension changes:
+  `IMG_7320-5eb75cfcf2d6578914.jxl`. A suffix is treated as a hash only when it
+  is a hyphen plus at least eight hex characters.
 - Animated inputs are skipped for now.
 - JXL viewer support is still limited, but it is an ISO standard
   (ISO/IEC 18181) designed for archival use.
