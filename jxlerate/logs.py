@@ -14,11 +14,12 @@ import os
 import re
 import threading
 from collections.abc import Callable
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from .fs import canonical_path, write_file_atomic
 
 LOG_EXTENSIONS = frozenset({".html", ".json", ".txt"})
+IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
 
 # Longest BOMs must be checked first: the UTF-32-LE BOM starts with the
 # UTF-16-LE BOM.
@@ -35,23 +36,51 @@ _BOMS = (
 _PATCH_LOCK = threading.Lock()
 
 
+def _export_files_parent(path: str) -> str | None:
+    """Return the export folder for a ``*.html_Files`` tree.
+
+    ``path`` may be the files folder itself or a nested input inside it.  The
+    returned parent is where the chat HTML lives, so log discovery can find it
+    even when the user only selected the media folder.
+    """
+    current = path
+    while True:
+        name = os.path.basename(current)
+        if name.lower().endswith(".html_files"):
+            parent = os.path.dirname(current)
+            if parent and parent != current:
+                return parent
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
 def log_search_roots(inputs, recursive: bool):
     """Return ``[(directory, recurse), ...]`` for log discovery.
 
     Directory inputs are scanned recursively when ``--recursive`` is set.
     Explicit file inputs only contribute their containing folder, without
     recursing into unrelated subfolders.
+
+    Inputs inside a DiscordChatExporter ``*.html_Files`` folder also contribute
+    the parent export folder (non-recursively), because the chat log is a
+    sibling of the media folder rather than inside it.
     """
     roots = {}
     for path in inputs:
         absolute = os.path.abspath(os.fspath(path))
         if os.path.isdir(absolute):
             root, recurse = absolute, bool(recursive)
+            export_parent = _export_files_parent(absolute)
         elif os.path.isfile(absolute):
             root, recurse = os.path.dirname(absolute), False
+            export_parent = _export_files_parent(root)
         else:
             continue
         roots[root] = roots.get(root, False) or recurse
+        if export_parent and export_parent not in roots:
+            roots[export_parent] = False
 
     selected = []
     keys = set()
@@ -64,8 +93,8 @@ def log_search_roots(inputs, recursive: bool):
     return selected
 
 
-def _iter_log_files(roots):
-    """Yield candidate log paths, skipping duplicates across roots."""
+def _iter_files(roots, extensions):
+    """Yield files under ``roots`` whose suffix is in ``extensions``."""
     seen = set()
     for root, recursive in roots:
         if not os.path.isdir(root):
@@ -74,7 +103,7 @@ def _iter_log_files(roots):
             for dirpath, _dirnames, filenames in os.walk(root):
                 for name in filenames:
                     suffix = os.path.splitext(name)[1].lower()
-                    if suffix not in LOG_EXTENSIONS:
+                    if suffix not in extensions:
                         continue
                     path = os.path.join(dirpath, name)
                     key = canonical_path(path)
@@ -89,7 +118,7 @@ def _iter_log_files(roots):
             with entries:
                 for entry in entries:
                     suffix = os.path.splitext(entry.name)[1].lower()
-                    if suffix not in LOG_EXTENSIONS:
+                    if suffix not in extensions:
                         continue
                     try:
                         if not entry.is_file():
@@ -100,6 +129,11 @@ def _iter_log_files(roots):
                     if key not in seen:
                         seen.add(key)
                         yield entry.path
+
+
+def _iter_log_files(roots):
+    """Yield candidate log paths, skipping duplicates across roots."""
+    yield from _iter_files(roots, LOG_EXTENSIONS)
 
 
 # Boundaries keep matches from starting or ending inside a longer filename.
@@ -115,6 +149,18 @@ _LEADING_BOUNDARY = (
 _TRAILING_BOUNDARY = (
     r"(?![A-Za-z0-9_.-]|%[0-9A-Fa-f]{2}|%u[0-9A-Fa-f]{4})"
 )
+
+# Broad reference scan used by the reconciliation pass.  The token excludes
+# whitespace, quotes, HTML delimiters, query/fragment markers, and separators
+# so a match is just the image path (the surrounding ``src=``/quotes stay
+# untouched).
+_REFERENCE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
+    r"(?P<ref>[^\s\"'<>?#=&(),;]+?\.(?:jpe?g|png|webp|gif))"
+    + _TRAILING_BOUNDARY,
+    re.IGNORECASE)
+_JS_ESCAPE = re.compile(r"%u([0-9A-Fa-f]{4})")
+_HASH_SUFFIX = re.compile(r"-[a-fA-F0-9]{8,}$")
 
 
 def _filename_char_pattern(char: str) -> str:
@@ -208,8 +254,8 @@ def _decode(raw: bytes):
         return None
 
 
-def _patch_file(path: str, pattern: re.Pattern,
-                replace: Callable[[re.Match], str]) -> bool:
+def _rewrite_log_file(path: str, transform: Callable[[str], str]) -> bool:
+    """Apply ``transform`` and write atomically when the text changes."""
     with _PATCH_LOCK:
         with open(path, "rb") as handle:
             raw = handle.read()
@@ -219,13 +265,19 @@ def _patch_file(path: str, pattern: re.Pattern,
             return False
         text, encoding, bom = decoded
 
-        updated, count = pattern.subn(replace, text)
-        if not count or updated == text:
+        updated = transform(text)
+        if updated == text:
             return False
 
         write_file_atomic(
             path, bom + updated.encode(encoding), preserve_mode=True)
         return True
+
+
+def _patch_file(path: str, pattern: re.Pattern,
+                replace: Callable[[re.Match], str]) -> bool:
+    return _rewrite_log_file(
+        path, lambda text: pattern.sub(replace, text))
 
 
 def patch_archive_logs(roots, old_filename: str,
@@ -258,4 +310,98 @@ def patch_archive_logs(roots, old_filename: str,
                 patched += 1
         except Exception:
             failed += 1
+    return patched, failed
+
+
+def _decode_reference(text: str) -> str:
+    """Decode percent escapes and JavaScript ``%uXXXX`` escapes."""
+    return unquote(_JS_ESCAPE.sub(
+        lambda match: chr(int(match.group(1), 16)), text))
+
+
+def _resolved_jxl_paths(target: str, log_path: str):
+    """Yield canonical candidate paths for ``target`` relative to the log."""
+    log_dir = os.path.dirname(os.path.abspath(log_path))
+    if os.path.isabs(target):
+        yield canonical_path(target)
+        return
+
+    yield canonical_path(os.path.join(log_dir, target))
+
+    # A chat log moved inside its own ``*_Files`` folder still carries paths
+    # such as ``Export.html_Files/name.jpg``.  Try those relative to the log
+    # as well.
+    prefix = os.path.basename(log_dir) + "/"
+    if target.startswith(prefix):
+        yield canonical_path(os.path.join(log_dir, target[len(prefix):]))
+
+
+def _reconcile_reference(match: re.Match, log_path: str,
+                         jxl_paths: set) -> str:
+    """Swap the extension when the matching ``.jxl`` file already exists."""
+    ref = match.group("ref")
+    if "://" in ref or ref.startswith("//"):
+        return ref
+
+    decoded = _decode_reference(ref)
+    stem, ext = os.path.splitext(decoded)
+    if ext.lower() not in IMAGE_EXTENSIONS:
+        return ref
+
+    targets = [stem]
+    clean = _HASH_SUFFIX.sub("", stem)
+    if clean != stem:
+        targets.append(clean)
+
+    for base in targets:
+        for candidate in _resolved_jxl_paths(base + ".jxl", log_path):
+            if candidate in jxl_paths:
+                return ref[:-len(ext)] + ".jxl"
+    return ref
+
+
+def patch_existing_jxl_logs(roots, dry_run: bool = False) -> tuple[int, int]:
+    """Patch references whose matching ``.jxl`` file already exists on disk.
+
+    Unlike :func:`patch_archive_logs`, this does not need the original image or
+    a conversion in the current batch.  It lets ``--patch-logs`` repair HTML
+    after images were converted by an earlier run, were skipped by
+    ``--skip-existing``, or no longer exist because ``--replace`` removed them.
+
+    Returns ``(patched_log_files, failed_log_files)``.  Remote URLs, missing
+    targets, and references whose basename does not resolve to an existing
+    ``.jxl`` file are left untouched.
+    """
+    jxl_paths = {
+        canonical_path(path)
+        for path in _iter_files(roots, frozenset({".jxl"}))
+    }
+    if not jxl_paths:
+        return 0, 0
+
+    patched = 0
+    failed = 0
+    for path in _iter_log_files(roots):
+        try:
+            if dry_run:
+                with open(path, "rb") as handle:
+                    decoded = _decode(handle.read())
+                if decoded is None:
+                    continue
+                updated = _REFERENCE_PATTERN.sub(
+                    lambda match, log_path=path: _reconcile_reference(
+                        match, log_path, jxl_paths),
+                    decoded[0])
+                if updated != decoded[0]:
+                    patched += 1
+            elif _rewrite_log_file(
+                    path,
+                    lambda text, log_path=path: _REFERENCE_PATTERN.sub(
+                        lambda match: _reconcile_reference(
+                            match, log_path, jxl_paths),
+                        text)):
+                patched += 1
+        except Exception:
+            if not dry_run:
+                failed += 1
     return patched, failed

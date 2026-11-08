@@ -7,7 +7,8 @@ from unittest import mock
 
 from jxlerate.core import NullReporter, RunOptions, process_one, run_batch
 from jxlerate.logs import (
-    _filename_pattern, log_search_roots, patch_archive_logs)
+    _filename_pattern, log_search_roots, patch_archive_logs,
+    patch_existing_jxl_logs)
 
 
 def write_bytes(path, data):
@@ -110,6 +111,31 @@ class LogPatchingTests(unittest.TestCase):
             roots = log_search_roots([image], recursive=True)
             self.assertEqual(
                 roots, [(os.path.abspath(directory), False)])
+
+    def test_files_folder_inputs_include_the_export_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            os.makedirs(files)
+            image = os.path.join(files, "photo.jpg")
+            write_bytes(image, b"data")
+
+            roots = log_search_roots([files], recursive=True)
+            self.assertIn((os.path.abspath(files), True), roots)
+            self.assertIn((os.path.abspath(directory), False), roots)
+
+            roots = log_search_roots([image], recursive=False)
+            self.assertIn((os.path.abspath(files), False), roots)
+            self.assertIn((os.path.abspath(directory), False), roots)
+
+    def test_nested_files_input_walks_up_to_the_export_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            nested = os.path.join(files, "nested")
+            os.makedirs(nested)
+
+            roots = log_search_roots([nested], recursive=True)
+            self.assertIn((os.path.abspath(nested), True), roots)
+            self.assertIn((os.path.abspath(directory), False), roots)
 
     def test_utf8_bom_crlf_and_unicode_are_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -438,6 +464,127 @@ class LogPatchingTests(unittest.TestCase):
                 f'<img src="{encoded[:-4]}.jxl">')
 
 
+class ExistingJxlReconciliationTests(unittest.TestCase):
+    def test_patches_local_references_and_skips_remote_or_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            os.makedirs(files)
+            write_bytes(os.path.join(files, "photo.jxl"), b"jxl")
+            log = os.path.join(directory, "Export.html")
+            content = (
+                '<img src="Export.html_Files/photo.jpg">\n'
+                '<a href="https://cdn.example/'
+                'Export.html_Files/photo.jpg">remote</a>\n'
+                '<img src="Export.html_Files/ghost.jpg">\n'
+                '<img src="Export.html_Files/photo.jpg.bak">\n')
+            write_bytes(log, content.encode("utf-8"))
+
+            self.assertEqual(
+                patch_existing_jxl_logs([(directory, True)]), (1, 0))
+
+            expected = (
+                '<img src="Export.html_Files/photo.jxl">\n'
+                '<a href="https://cdn.example/'
+                'Export.html_Files/photo.jpg">remote</a>\n'
+                '<img src="Export.html_Files/ghost.jpg">\n'
+                '<img src="Export.html_Files/photo.jpg.bak">\n')
+            self.assertEqual(read_bytes(log).decode("utf-8"), expected)
+
+    def test_patches_encoded_basenames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            os.makedirs(files)
+            names = [
+                ("i_p_c_191919,bnr_1,wmk,s_630,"
+                 "q_90-bb67314a40a0660c.jpg"),
+                ("My%20Little%20Pony%20Forever%20Friendship-"
+                 "3b2fd2a7e58e4ca6.jpg"),
+                "Bob\u2019s photo.jpg",
+            ]
+            for name in names:
+                write_bytes(
+                    os.path.join(files, name[:-4] + ".jxl"), b"jxl")
+
+            comma = names[0].replace(",", "%2C")
+            percent = names[1].replace("%", "%25")
+            bob_utf8 = "Bob%E2%80%99s%20photo.jpg"
+            bob_js = "Bob%u2019s%20photo.jpg"
+            log = os.path.join(directory, "Export.html")
+            content = (
+                f'<img src="Export.html_Files/{comma}">\n'
+                f'<img src="Export.html_Files/{percent}">\n'
+                f'<img src="Export.html_Files/{bob_utf8}">\n'
+                f'<img src="Export.html_Files/{bob_js}">\n')
+            write_bytes(log, content.encode("utf-8"))
+
+            self.assertEqual(
+                patch_existing_jxl_logs([(directory, True)]), (1, 0))
+
+            expected = (
+                f'<img src="Export.html_Files/{comma[:-4]}.jxl">\n'
+                f'<img src="Export.html_Files/{percent[:-4]}.jxl">\n'
+                f'<img src="Export.html_Files/{bob_utf8[:-4]}.jxl">\n'
+                f'<img src="Export.html_Files/{bob_js[:-4]}.jxl">\n')
+            self.assertEqual(read_bytes(log).decode("utf-8"), expected)
+
+    def test_preserves_a_discord_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            os.makedirs(files)
+            write_bytes(os.path.join(files, "IMG_7320.jxl"), b"jxl")
+            log = os.path.join(directory, "Export.html")
+            reference = "IMG_7320-5eb75cfcf2d6578914.jpg"
+            write_bytes(
+                log, f'<img src="Export.html_Files/{reference}">'.encode())
+
+            self.assertEqual(
+                patch_existing_jxl_logs([(directory, True)]), (1, 0))
+            self.assertEqual(
+                read_bytes(log).decode("utf-8"),
+                '<img src="Export.html_Files/'
+                'IMG_7320-5eb75cfcf2d6578914.jxl">')
+
+    def test_handles_a_log_moved_inside_its_own_files_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            os.makedirs(files)
+            write_bytes(os.path.join(files, "photo.jxl"), b"jxl")
+            log = os.path.join(files, "Export.html")
+            write_bytes(
+                log, b'<img src="Export.html_Files/photo.jpg">')
+
+            self.assertEqual(
+                patch_existing_jxl_logs([(files, False)]), (1, 0))
+            self.assertEqual(
+                read_bytes(log),
+                b'<img src="Export.html_Files/photo.jxl">')
+
+    def test_dry_run_reports_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            os.makedirs(files)
+            write_bytes(os.path.join(files, "photo.jxl"), b"jxl")
+            log = os.path.join(directory, "Export.html")
+            original = b'<img src="Export.html_Files/photo.jpg">'
+            write_bytes(log, original)
+
+            self.assertEqual(
+                patch_existing_jxl_logs([(directory, True)],
+                                        dry_run=True),
+                (1, 0))
+            self.assertEqual(read_bytes(log), original)
+
+    def test_no_jxl_files_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = os.path.join(directory, "Export.html")
+            original = b'<img src="photo.jpg">'
+            write_bytes(log, original)
+
+            self.assertEqual(
+                patch_existing_jxl_logs([(directory, True)]), (0, 0))
+            self.assertEqual(read_bytes(log), original)
+
+
 class JxlLogIntegrationTests(unittest.TestCase):
     def test_logs_are_patched_before_the_original_is_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -503,6 +650,44 @@ class JxlLogIntegrationTests(unittest.TestCase):
             self.assertEqual(patched.count(f"Export_Files/{encoded[:-4]}.jxl"),
                              2)
             self.assertNotIn(encoded, patched)
+
+    def test_reconciliation_runs_when_no_source_images_remain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = os.path.join(directory, "Export.html_Files")
+            os.makedirs(files)
+            write_bytes(os.path.join(files, "photo.jxl"), b"jxl")
+            log = os.path.join(directory, "Export.html")
+            write_bytes(log, b'<img src="Export.html_Files/photo.jpg">')
+
+            options = RunOptions(
+                inputs=(files,), to_jxl=True, replace=True,
+                patch_logs=True, recursive=True)
+            summary = run_batch(options, NullReporter())
+
+            self.assertTrue(summary.no_images)
+            self.assertEqual((summary.ok, summary.failed), (0, 0))
+            self.assertEqual(
+                read_bytes(log),
+                b'<img src="Export.html_Files/photo.jxl">')
+
+    def test_reconciliation_runs_when_skip_existing_skips_conversion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = os.path.join(directory, "photo.jpg")
+            write_bytes(source, b"source-bytes")
+            output = os.path.join(directory, "photo.jxl")
+            write_bytes(output, b"jxl")
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, b'<img src="photo.jpg">')
+
+            options = RunOptions(
+                inputs=(source,), to_jxl=True, replace=True,
+                patch_logs=True, skip_existing=True)
+            summary = run_batch(options, NullReporter())
+
+            self.assertEqual((summary.ok, summary.failed), (0, 0))
+            self.assertEqual(summary.skipped, 1)
+            self.assertTrue(os.path.exists(source))
+            self.assertEqual(read_bytes(log), b'<img src="photo.jxl">')
 
     def test_failed_log_patch_keeps_the_original(self):
         with tempfile.TemporaryDirectory() as directory:

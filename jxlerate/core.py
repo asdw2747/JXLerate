@@ -31,7 +31,8 @@ from .fs import (
 )
 from .imaging import lossy_bytes, verify_lossless
 from .jxl import to_jxl_file
-from .logs import log_search_roots, patch_archive_logs
+from .logs import (
+    log_search_roots, patch_archive_logs, patch_existing_jxl_logs)
 from .manifest import manifest_row
 
 
@@ -108,6 +109,8 @@ class RunSummary:
     error: str | None = None
     output_dir: str | None = None
     manifest_rows: list = field(default_factory=list)
+    logs_patched: int = 0
+    logs_failed: int = 0
 
 
 class Reporter(Protocol):
@@ -341,6 +344,8 @@ def _record_result(summary: RunSummary, result: FileResult,
             reporter.log(result.message)
 
     if result.logs_patched or result.logs_failed:
+        summary.logs_patched += result.logs_patched
+        summary.logs_failed += result.logs_failed
         details = [f"{result.logs_patched} updated"]
         if result.logs_failed:
             details.append(f"{result.logs_failed} failed")
@@ -437,6 +442,21 @@ def _iter_results(entries, planned_outputs, options: RunOptions,
             state["stopped"] = True
 
 
+def _reconcile_existing_logs(log_roots, reporter: Reporter,
+                             dry_run: bool = False) -> tuple[int, int]:
+    """Patch references for already-converted ``.jxl`` files."""
+    if log_roots is None:
+        return 0, 0
+    patched, failed = patch_existing_jxl_logs(log_roots, dry_run=dry_run)
+    if patched or failed:
+        details = [f"{patched} file(s) updated"]
+        if failed:
+            details.append(f"{failed} failed")
+        verb = "would reconcile" if dry_run else "reconciled"
+        reporter.log(f"LOGS: {verb} {', '.join(details)}")
+    return patched, failed
+
+
 def run_batch(options: RunOptions, reporter: Reporter,
               cancel_event=None) -> RunSummary:
     """Run a complete batch through the shared pipeline."""
@@ -449,8 +469,13 @@ def run_batch(options: RunOptions, reporter: Reporter,
 
     entries = collect_file_entries(
         options.inputs, options.recursive, exclude_dir)
+    log_roots = (log_search_roots(options.inputs, options.recursive)
+                 if options.patch_logs else None)
     if not entries and not (options.passthrough and output_dir):
-        return RunSummary(no_images=True, output_dir=output_dir)
+        summary = RunSummary(no_images=True, output_dir=output_dir)
+        summary.logs_patched, summary.logs_failed = (
+            _reconcile_existing_logs(log_roots, reporter, options.dry_run))
+        return summary
 
     passthrough_entries = []
     if options.passthrough and output_dir:
@@ -483,8 +508,6 @@ def run_batch(options: RunOptions, reporter: Reporter,
                     if options.manifest else "")
 
     reporter.start(len(entries))
-    log_roots = (log_search_roots(options.inputs, options.recursive)
-                 if options.patch_logs else None)
     processed = 0
     for source, result in _iter_results(
             entries, planned_outputs, options, reporter, cancel_event,
@@ -519,5 +542,9 @@ def run_batch(options: RunOptions, reporter: Reporter,
                 reporter.error(f"PASSTHROUGH FAIL: {exc}")
                 summary.failed += 1
 
+    patched, failed = _reconcile_existing_logs(
+        log_roots, reporter, options.dry_run)
+    summary.logs_patched += patched
+    summary.logs_failed += failed
     reporter.progress(len(entries), len(entries), "")
     return summary

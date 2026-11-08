@@ -660,6 +660,11 @@ class App(tk.Tk):
             self.last_output_dir = summary.output_dir
 
         if summary.no_images:
+            if summary.logs_patched:
+                self.log_msg(
+                    "No image files to convert; log references were updated.")
+                self.status_var.set("Logs updated")
+                return
             self.log_msg("No image files found.")
             self.status_var.set("No image files found")
             messagebox.showwarning(

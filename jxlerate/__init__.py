@@ -81,7 +81,10 @@ from .fs import (
     write_file_atomic,
 )
 from .manifest import MANIFEST_FIELDS, write_manifest, verify_manifest
-from .logs import LOG_EXTENSIONS, log_search_roots, patch_archive_logs
+from .logs import (
+    LOG_EXTENSIONS, log_search_roots, patch_archive_logs,
+    patch_existing_jxl_logs,
+)
 from .dedupe import (
     dedupe_entries,
     hardlink_metadata_signature as _hardlink_metadata_signature,
@@ -133,5 +136,6 @@ __all__ = [
     "verify_manifest",
     "log_search_roots",
     "patch_archive_logs",
+    "patch_existing_jxl_logs",
     "dedupe_entries",
 ]

@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.3] - 2026-11-08
+
+### Fixed
+- `--patch-logs` now finds the chat HTML when the input is a
+  `*.html_Files` media folder (or a file inside it). The parent export folder is
+  searched non-recursively, so both the export root and its media folder work.
+- Added a post-batch reconciliation pass that updates references whose `.jxl`
+  file already exists. This fixes archives converted before Patch log
+  references was enabled, runs using `--skip-existing`, and runs where
+  `--replace` already removed the original images.
+- Reconciliation resolves each reference relative to its log, skips remote
+  URLs, and only rewrites the extension when the target `.jxl` exists. Encoded
+  basenames, `%uXXXX` escapes, and Discord hashes are preserved.
+- A run with no source images remaining now reports the reconciled log files
+  and exits successfully instead of failing with “no image files found” when
+  logs were updated.
+
+### Changed
+- `RunSummary` exposes `logs_patched` and `logs_failed`.
+- `log_search_roots()` includes the export parent for `*.html_Files` inputs.
+- `tests/test_logs.py` covers media-folder discovery, reconciliation with no
+  source images, `--skip-existing`, encoded/hashed references, the
+  log-inside-`_Files` layout, remote URLs, missing targets, and dry-run.
+
 ## [2.4.2] - 2026-11-07
 
 ### Fixed

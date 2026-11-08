@@ -174,7 +174,7 @@ def main():
 
     if summary.error:
         ap.error(summary.error)
-    if summary.no_images:
+    if summary.no_images and not summary.logs_patched:
         print("no image files found", file=sys.stderr)
         sys.exit(1)
 
