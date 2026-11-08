@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.2] - 2026-11-07
+
+### Fixed
+- `--patch-logs` now matches percent-encoded basenames against decoded files on
+  disk. DiscordChatExporter writes references such as
+  `i_p_c_191919%2Cbnr_1%2Cwmk.jpg`, `My%2520Little%2520Pony.jpg`, and
+  `Bob%E2%80%99s%20photo.jpg` (or `Bob%u2019s%20photo.jpg`), while the files
+  themselves contain commas, literal `%20`, and curly apostrophes. Only the
+  extension changes; the encoded spelling stays byte-identical.
+- `_filename_pattern()` reduces its input to the basename internally, so an
+  absolute or encoded parent directory can never prevent a match.
+- Boundaries now accept `/`, quotes, HTML/URL delimiters, and preceding
+  encoded tags (`%20`, `%2C`, `%u2019`). Trailing encoded tags are rejected so
+  `photo.jpg%20extra` is not mistaken for the complete filename.
+- Discord hash preservation still applies to encoded references:
+  `Bob%E2%80%99s%20photo-5eb75cfcf2d6578914.jpg` becomes
+  `Bob%E2%80%99s%20photo-5eb75cfcf2d6578914.jxl`.
+
+### Changed
+- `tests/test_logs.py` adds coverage for full-path inputs, URL/HTML delimiter
+  boundaries, comma-encoded and double-encoded basenames, `%E2%80%99` and
+  `%u2019` apostrophes, encoded hashes, encoded decoys, idempotence, and a
+  Discord-style end-to-end conversion.
+
 ## [2.4.1] - 2026-11-07
 
 ### Fixed

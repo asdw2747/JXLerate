@@ -6,7 +6,8 @@ import unittest
 from unittest import mock
 
 from jxlerate.core import NullReporter, RunOptions, process_one, run_batch
-from jxlerate.logs import log_search_roots, patch_archive_logs
+from jxlerate.logs import (
+    _filename_pattern, log_search_roots, patch_archive_logs)
 
 
 def write_bytes(path, data):
@@ -280,6 +281,162 @@ class LogPatchingTests(unittest.TestCase):
             self.assertEqual((patched, failed), (0, 0))
             self.assertEqual(read_bytes(log), b"README README.md")
 
+    def test_full_path_is_reduced_to_the_basename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nested = os.path.join(directory, "Encoded%20Folder")
+            os.makedirs(nested)
+            source = os.path.join(nested, "IMG_7320.jpg")
+            output = os.path.join(nested, "IMG_7320.jxl")
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, b'<img src="images/IMG_7320.jpg">')
+
+            pattern = _filename_pattern(source)
+            self.assertIsNotNone(pattern)
+            self.assertNotIn("Encoded", pattern.pattern)
+
+            patched, failed = patch_archive_logs(
+                [(directory, False)], source, output)
+            self.assertEqual((patched, failed), (1, 0))
+            self.assertEqual(
+                read_bytes(log), b'<img src="images/IMG_7320.jxl">')
+
+    def test_matches_after_url_and_html_delimiters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = os.path.join(directory, "archive.html")
+            content = (
+                'url="https://cdn.example/attachments/1/2/'
+                'IMG_7320-5eb75cfcf2d6578914.jpg?ex=1&is=2&hm=3"\n'
+                'attr=src=images/IMG_7320.jpg\n'
+                'quoted="IMG_7320.jpg"\n'
+                'tag=dir%20name/IMG_7320.jpg\n'
+                'tag=dir%20name%20IMG_7320.jpg\n'
+                'tag=dir%u2019name%20IMG_7320.jpg\n'
+                'decoy=copyIMG_7320.jpg\n')
+            write_bytes(log, content.encode("utf-8"))
+
+            patched, failed = patch_archive_logs(
+                [(directory, False)], "IMG_7320.jpg", "IMG_7320.jxl")
+            self.assertEqual((patched, failed), (1, 0))
+
+            expected = (
+                'url="https://cdn.example/attachments/1/2/'
+                'IMG_7320-5eb75cfcf2d6578914.jxl?ex=1&is=2&hm=3"\n'
+                'attr=src=images/IMG_7320.jxl\n'
+                'quoted="IMG_7320.jxl"\n'
+                'tag=dir%20name/IMG_7320.jxl\n'
+                'tag=dir%20name%20IMG_7320.jxl\n'
+                'tag=dir%u2019name%20IMG_7320.jxl\n'
+                'decoy=copyIMG_7320.jpg\n')
+            self.assertEqual(read_bytes(log).decode("utf-8"), expected)
+
+    def test_percent_encoded_basename_is_patched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = ("i_p_c_191919,bnr_1,wmk,s_630,"
+                    "q_90-bb67314a40a0660c.jpg")
+            encoded = name.replace(",", "%2C")
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, f'<img src="Export_Files/{encoded}">'.encode())
+
+            patched, failed = patch_archive_logs(
+                [(directory, False)], name, name[:-4] + ".jxl")
+            self.assertEqual((patched, failed), (1, 0))
+            self.assertEqual(
+                read_bytes(log).decode("utf-8"),
+                f'<img src="Export_Files/{encoded[:-4]}.jxl">')
+
+    def test_double_encoded_percent_basename_is_patched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = (
+                "My%20Little%20Pony%20Forever%20Friendship-"
+                "3b2fd2a7e58e4ca6.jpg")
+            encoded = name.replace("%", "%25")
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, f'<img src="Export_Files/{encoded}">'.encode())
+
+            patched, failed = patch_archive_logs(
+                [(directory, False)], name, name[:-4] + ".jxl")
+            self.assertEqual((patched, failed), (1, 0))
+            self.assertEqual(
+                read_bytes(log).decode("utf-8"),
+                f'<img src="Export_Files/{encoded[:-4]}.jxl">')
+
+    def test_encoded_unicode_basename_is_patched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = "Bob\u2019s photo.jpg"
+            log = os.path.join(directory, "archive.html")
+            content = (
+                '<img src="Files/Bob%E2%80%99s%20photo.jpg">\n'
+                '<img src="Files/Bob%u2019s%20photo.jpg">\n'
+                '<img src="Files/Bob\u2019s photo.jpg">\n')
+            write_bytes(log, content.encode("utf-8"))
+
+            patched, failed = patch_archive_logs(
+                [(directory, False)], name, name[:-4] + ".jxl")
+            self.assertEqual((patched, failed), (1, 0))
+
+            self.assertEqual(
+                read_bytes(log).decode("utf-8"),
+                '<img src="Files/Bob%E2%80%99s%20photo.jxl">\n'
+                '<img src="Files/Bob%u2019s%20photo.jxl">\n'
+                '<img src="Files/Bob\u2019s photo.jxl">\n')
+
+    def test_encoded_basename_with_hash_is_patched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = "Bob\u2019s photo.jpg"
+            reference = "Bob%E2%80%99s%20photo-5eb75cfcf2d6578914.jpg"
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, f'<img src="Files/{reference}">'.encode())
+
+            patched, failed = patch_archive_logs(
+                [(directory, False)], name, name[:-4] + ".jxl")
+            self.assertEqual((patched, failed), (1, 0))
+            self.assertEqual(
+                read_bytes(log).decode("utf-8"),
+                '<img src="Files/'
+                'Bob%E2%80%99s%20photo-5eb75cfcf2d6578914.jxl">')
+
+    def test_encoded_basename_respects_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = "Bob\u2019s photo.jpg"
+            base = "Bob%E2%80%99s%20photo"
+            content = (
+                f'bad1="copy{base}.jpg" bad2="my-{base}.jpg" '
+                f'bad3="{base}.jpg.bak" bad4="{base}.jpgx" '
+                f'bad5="{base}.jpeg" '
+                f'ok="{base}.jpg"')
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, content.encode("utf-8"))
+
+            patched, failed = patch_archive_logs(
+                [(directory, False)], name, name[:-4] + ".jxl")
+            self.assertEqual((patched, failed), (1, 0))
+
+            expected = (
+                f'bad1="copy{base}.jpg" bad2="my-{base}.jpg" '
+                f'bad3="{base}.jpg.bak" bad4="{base}.jpgx" '
+                f'bad5="{base}.jpeg" '
+                f'ok="{base}.jxl"')
+            self.assertEqual(read_bytes(log).decode("utf-8"), expected)
+
+    def test_encoded_basename_patching_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = "i_p_c_191919,bnr_1,wmk,s_630,q_90-bb67314a40a0660c.jpg"
+            encoded = name.replace(",", "%2C")
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, f'<img src="{encoded}">'.encode())
+
+            self.assertEqual(
+                patch_archive_logs([(directory, False)],
+                                   name, name[:-4] + ".jxl"),
+                (1, 0))
+            self.assertEqual(
+                patch_archive_logs([(directory, False)],
+                                   name, name[:-4] + ".jxl"),
+                (0, 0))
+            self.assertEqual(
+                read_bytes(log).decode("utf-8"),
+                f'<img src="{encoded[:-4]}.jxl">')
+
 
 class JxlLogIntegrationTests(unittest.TestCase):
     def test_logs_are_patched_before_the_original_is_deleted(self):
@@ -317,6 +474,35 @@ class JxlLogIntegrationTests(unittest.TestCase):
                 read_bytes(log),
                 b'<img src="IMG_7320-5eb75cfcf2d6578914.jxl">'
                 b'<img src="IMG_7320.jxl">')
+
+    def test_encoded_discord_export_reference_is_patched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name = ("i_p_c_191919,bnr_1,wmk,s_630,"
+                    "q_90-bb67314a40a0660c.jpg")
+            encoded = name.replace(",", "%2C")
+            source = os.path.join(directory, name)
+            write_bytes(source, b"source-bytes")
+            output = os.path.join(directory, name[:-4] + ".jxl")
+            log = os.path.join(directory, "archive.html")
+            write_bytes(log, (
+                '<div class=chatlog__attachment><a href='
+                f'Export_Files/{encoded}><img src=Export_Files/{encoded}>'
+                '</a></div>').encode("utf-8"))
+
+            options = RunOptions(
+                inputs=(source,), to_jxl=True, replace=True, patch_logs=True)
+            with mock.patch(
+                    "jxlerate.core.to_jxl_file",
+                    return_value=(b"jxl-bytes", 12, "cjxl")):
+                summary = run_batch(options, NullReporter())
+
+            self.assertEqual((summary.ok, summary.failed), (1, 0))
+            self.assertFalse(os.path.exists(source))
+            self.assertTrue(os.path.isfile(output))
+            patched = read_bytes(log).decode("utf-8")
+            self.assertEqual(patched.count(f"Export_Files/{encoded[:-4]}.jxl"),
+                             2)
+            self.assertNotIn(encoded, patched)
 
     def test_failed_log_patch_keeps_the_original(self):
         with tempfile.TemporaryDirectory() as directory:
