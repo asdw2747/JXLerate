@@ -6,6 +6,7 @@ import unittest
 from unittest import mock
 
 from jxlerate.core import NullReporter, RunOptions, process_one, run_batch
+from jxlerate.fs import _replace_with_retry
 from jxlerate.logs import (
     _filename_pattern, log_search_roots, patch_archive_logs,
     patch_existing_jxl_logs)
@@ -19,6 +20,25 @@ def write_bytes(path, data):
 def read_bytes(path):
     with open(path, "rb") as handle:
         return handle.read()
+
+
+class AtomicWriteRetryTests(unittest.TestCase):
+    def test_replace_retries_a_windows_sharing_violation(self):
+        calls = []
+
+        def flaky_replace(source, destination):
+            calls.append((source, destination))
+            if len(calls) == 1:
+                raise PermissionError("sharing violation")
+            return None
+
+        with mock.patch("jxlerate.fs.os.name", "nt"), \
+                mock.patch("jxlerate.fs.os.replace",
+                           side_effect=flaky_replace), \
+                mock.patch("jxlerate.fs.time.sleep"):
+            _replace_with_retry("source", "destination")
+
+        self.assertEqual(len(calls), 2)
 
 
 class LogPatchingTests(unittest.TestCase):
@@ -206,17 +226,23 @@ class LogPatchingTests(unittest.TestCase):
             names = [f"image{index}-abcdef123456.png" for index in range(8)]
             write_bytes(log, " ".join(names).encode("utf-8"))
 
+            results = []
+
+            def run(name):
+                results.append(patch_archive_logs(
+                    [(directory, False)], name,
+                    os.path.splitext(name)[0] + ".jxl"))
+
             threads = [
-                threading.Thread(
-                    target=patch_archive_logs,
-                    args=([(directory, False)], name,
-                          os.path.splitext(name)[0] + ".jxl"))
+                threading.Thread(target=run, args=(name,))
                 for name in names
             ]
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
+
+            self.assertEqual(results.count((1, 0)), len(names), results)
 
             content = read_bytes(log).decode("utf-8")
             for name in names:

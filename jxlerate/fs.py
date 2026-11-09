@@ -9,12 +9,31 @@ import os
 import shutil
 import stat
 import tempfile
+import time
 
 from .formats import IMAGE_EXTS
 
 
 def is_image(name: str) -> bool:
     return os.path.splitext(name)[1].lower() in IMAGE_EXTS
+
+
+def _replace_with_retry(source: str, destination: str) -> None:
+    """Replace ``destination``, retrying transient Windows sharing errors."""
+    attempts = 5 if os.name == "nt" else 1
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            transient = (
+                os.name == "nt"
+                and (isinstance(exc, PermissionError)
+                     or getattr(exc, "winerror", None) in (5, 32, 33))
+            )
+            if not transient or attempt == attempts - 1:
+                raise
+            time.sleep(0.01 * (2 ** attempt))
 
 
 def write_file_atomic(path: str, data: bytes,
@@ -53,7 +72,7 @@ def write_file_atomic(path: str, data: bytes,
                 os.utime(
                     tmp,
                     ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
-        os.replace(tmp, target)
+        _replace_with_retry(tmp, target)
     except BaseException:
         try:
             os.unlink(tmp)

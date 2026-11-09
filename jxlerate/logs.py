@@ -32,8 +32,9 @@ _BOMS = (
 )
 
 # Serialize read-modify-write cycles: parallel --jobs workers may touch the
-# same log file.
-_PATCH_LOCK = threading.Lock()
+# same log file.  The reentrant lock lets a caller hold it across discovery
+# and patching while helpers re-enter for each individual file.
+_PATCH_LOCK = threading.RLock()
 
 
 def _export_files_parent(path: str) -> str | None:
@@ -304,12 +305,14 @@ def patch_archive_logs(roots, old_filename: str,
     replace = _replacement(old_name, new_name)
     patched = 0
     failed = 0
-    for path in _iter_log_files(roots):
-        try:
-            if _patch_file(path, pattern, replace):
-                patched += 1
-        except Exception:
-            failed += 1
+    with _PATCH_LOCK:
+        paths = list(_iter_log_files(roots))
+        for path in paths:
+            try:
+                if _patch_file(path, pattern, replace):
+                    patched += 1
+            except Exception:
+                failed += 1
     return patched, failed
 
 
@@ -381,27 +384,29 @@ def patch_existing_jxl_logs(roots, dry_run: bool = False) -> tuple[int, int]:
 
     patched = 0
     failed = 0
-    for path in _iter_log_files(roots):
-        try:
-            if dry_run:
-                with open(path, "rb") as handle:
-                    decoded = _decode(handle.read())
-                if decoded is None:
-                    continue
-                updated = _REFERENCE_PATTERN.sub(
-                    lambda match, log_path=path: _reconcile_reference(
-                        match, log_path, jxl_paths),
-                    decoded[0])
-                if updated != decoded[0]:
-                    patched += 1
-            elif _rewrite_log_file(
-                    path,
-                    lambda text, log_path=path: _REFERENCE_PATTERN.sub(
-                        lambda match: _reconcile_reference(
+    with _PATCH_LOCK:
+        paths = list(_iter_log_files(roots))
+        for path in paths:
+            try:
+                if dry_run:
+                    with open(path, "rb") as handle:
+                        decoded = _decode(handle.read())
+                    if decoded is None:
+                        continue
+                    updated = _REFERENCE_PATTERN.sub(
+                        lambda match, log_path=path: _reconcile_reference(
                             match, log_path, jxl_paths),
-                        text)):
-                patched += 1
-        except Exception:
-            if not dry_run:
-                failed += 1
+                        decoded[0])
+                    if updated != decoded[0]:
+                        patched += 1
+                elif _rewrite_log_file(
+                        path,
+                        lambda text, log_path=path: _REFERENCE_PATTERN.sub(
+                            lambda match: _reconcile_reference(
+                                match, log_path, jxl_paths),
+                            text)):
+                    patched += 1
+            except Exception:
+                if not dry_run:
+                    failed += 1
     return patched, failed

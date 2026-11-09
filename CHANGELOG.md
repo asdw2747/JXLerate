@@ -3,6 +3,22 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [2.4.4] - 2026-11-09
+
+### Fixed
+- Log patching is now fully serialized across discovery and writes using a
+  reentrant lock, and log paths are materialized before any file is replaced.
+  This closes a Windows/Python 3.10 concurrency race that could silently drop
+  one reference update when several `--jobs` workers patched the same log.
+- `write_file_atomic()` retries transient Windows sharing violations
+  (`winerror` 5, 32, or 33) with a short backoff before failing, instead of
+  losing the write immediately.
+
+### Changed
+- The concurrent patching test now asserts every thread reports `(1, 0)` and
+  includes the collected results in the failure message.
+- Added unit coverage for the Windows `os.replace()` retry path.
+
 ## [2.4.3] - 2026-11-08
 
 ### Fixed
